@@ -2,7 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { hasDb, db } from "@/lib/db";
-import { cache, categoryFor, lineInfo } from "@/lib/hrdf/lookups";
+import { cache, categoryFor, categoryIn, lineInfo, texts } from "@/lib/hrdf/lookups";
+import { getLang } from "@/lib/lang";
 import { infotextAll, searchJourneys } from "@/lib/hrdf/queries";
 import { decodeLine } from "@/lib/hrdf/decoders";
 import { minutesToTime } from "@/lib/hrdf/calendar";
@@ -76,6 +77,8 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
   if (!TITLES[kind]) notFound();
   const d = db();
   const c = cache();
+  const lang = await getLang();
+  const t = texts(lang);
   const fileRows = (fileLike: string, key: string) => d.prepare("SELECT file, n, text, section FROM lines WHERE file LIKE ? AND key = ? ORDER BY file, n").all(fileLike, key) as { file: string; n: number; text: string; section: string | null }[];
   const byFile = (rows: { file: string; n: number; text: string; section: string | null }[]) => {
     const m = new Map<string, typeof rows>();
@@ -86,7 +89,7 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
 
   if (kind === "admin") {
     const admin = id.padStart(6, "0");
-    const op = c.operatorsByAdmin.get(admin);
+    const op = t.operatorsByAdmin.get(admin);
     const rows = op ? fileRows("BETRIEB%", String(Number(op.key))) : [];
     const cats = d.prepare("SELECT category, COUNT(*) n FROM journeys WHERE admin = ? GROUP BY category ORDER BY n DESC").all(admin) as { category: string; n: number }[];
     return (
@@ -107,7 +110,7 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
         </PageHeader>
         <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-6">
           {cats.slice(0, 12).map((x) => (
-            <Stat key={x.category} label={`${x.category} · ${categoryFor(x.category)?.label ?? ""}`} value={x.n.toLocaleString()} href={`/journeys?admin=${admin}&category=${x.category}`} />
+            <Stat key={x.category} label={`${x.category} · ${categoryIn(x.category, lang)?.label ?? ""}`} value={x.n.toLocaleString()} href={`/journeys?admin=${admin}&category=${x.category}`} />
           ))}
         </div>
         {byFile(rows).map(([f, r]) => (
@@ -121,7 +124,7 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
   }
 
   if (kind === "category") {
-    const cat = categoryFor(id);
+    const cat = categoryIn(id, lang);
     const rows = fileRows("ZUGART", id);
     const col = classColor(cat?.productClass);
     return (
@@ -158,7 +161,7 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
     const n = jlineCount("*A", "code", id);
     return (
       <div>
-        <PageHeader eyebrow={`${TITLES.attribute} · ATTRIBUT`} title={<span><span className="font-mono">{id}</span> · {c.attributes.get(id) ?? "Unknown attribute"}</span>}>
+        <PageHeader eyebrow={`${TITLES.attribute} · ATTRIBUT`} title={<span><span className="font-mono">{id}</span> · {t.attributes.get(id) ?? "Unknown attribute"}</span>}>
           Used in <Link className="link-u" href={`/files/FPLAN?type=*A&code=${encodeURIComponent(id)}`}>{n.toLocaleString()} FPLAN *A lines</Link>
         </PageHeader>
         {byFile(rows).map(([f, r]) => (
@@ -187,14 +190,14 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
 
   // infotext
   const nr = String(Number(id));
-  const texts = infotextAll(Number(id));
+  const infos = infotextAll(Number(id));
   const padded = id.padStart(9, "0");
   const usage = d.prepare("SELECT code, COUNT(*) n FROM jlines WHERE type = '*I' AND ref = ? GROUP BY code").all(padded) as { code: string; n: number }[];
   const sample = d.prepare("SELECT journey FROM jlines WHERE type = '*I' AND ref = ? LIMIT 20").all(padded) as { journey: number }[];
   const other = d.prepare("SELECT l.file, l.n, l.text, l.section FROM refs r JOIN lines l ON l.file = r.file AND l.n = r.n WHERE r.kind = 'infotext' AND r.ref = ? AND r.file NOT LIKE 'INFOTEXT%' LIMIT 50").all(nr) as { file: string; n: number; text: string; section: string | null }[];
   return (
     <div>
-      <PageHeader eyebrow={`${TITLES.infotext} · INFOTEXT`} title={texts[0]?.text.slice(10).trim() || `Info text ${id}`}>
+      <PageHeader eyebrow={`${TITLES.infotext} · INFOTEXT`} title={(infos.find((x) => x.file === `INFOTEXT_${lang}`) ?? infos[0])?.text.slice(10).trim() || `Info text ${id}`}>
         <span className="font-mono">{padded}</span>
         {usage.length ? (
           <span>
@@ -209,12 +212,12 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
       </PageHeader>
       <Section title="All languages">
         <div className="divide-y rounded-md border bg-card">
-          {texts.map((t) => (
-            <div key={t.file} className="grid grid-cols-[120px_minmax(0,1fr)] gap-3 px-3 py-2 text-sm">
-              <Link href={`/files/${t.file}?key=${nr}`} className="font-mono text-xs text-muted-foreground hover:text-primary">
-                {t.file}
+          {infos.map((x) => (
+            <div key={x.file} className="grid grid-cols-[120px_minmax(0,1fr)] gap-3 px-3 py-2 text-sm">
+              <Link href={`/files/${x.file}?key=${nr}`} className="font-mono text-xs text-muted-foreground hover:text-primary">
+                {x.file}
               </Link>
-              <span className="break-words">{t.text.slice(10).trim()}</span>
+              <span className="break-words">{x.text.slice(10).trim()}</span>
             </div>
           ))}
         </div>

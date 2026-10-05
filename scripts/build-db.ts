@@ -309,9 +309,25 @@ async function main() {
   log(`Done in ${((Date.now() - t0) / 1000).toFixed(0)}s → ${dbPath} (${(statSync(dbPath).size / 1e9).toFixed(2)} GB)`);
 }
 
+/**
+ * ZEITVS ships as a single physical line: header comments, then records each
+ * followed by "% comment" that runs straight into the next record
+ * ("…MEZ=GMT+11000000 +0200…"). Re-split into one record (+ comment) per line.
+ */
 function splitZeitvs(raw: string): string[] {
-  // Records look like "0000000 +0100 +0200 ... 0300  " and are separated by "%".
-  return raw.split("%").map((s) => s.trimEnd()).filter((s) => s.trim());
+  // Type 1: stop, offset, DST groups. Type 2: stop, stop to copy rules from.
+  const REC = String.raw`\d{7} (?:[+-]\d{4}(?: [+-]\d{4} \d{8} \d{4} \d{8} \d{4})*|\d{7})`;
+  const out: string[] = [];
+  const first = raw.search(new RegExp(REC));
+  const head = first >= 0 ? raw.slice(0, first) : raw;
+  for (const h of head.split("%")) if (h.trim()) out.push(`% ${h.trim()}`);
+  if (first < 0) return out;
+  const re = new RegExp(String.raw`(${REC})\s*(?:%\s*(.*?))?\s*(?=${REC}|$)`, "gs");
+  for (const m of raw.slice(first).matchAll(re)) {
+    const note = m[2]?.replace(/%\s*$/, "").trim();
+    out.push(note ? `${m[1]} % ${note}` : m[1]);
+  }
+  return out;
 }
 
 function popcount(n: number) {

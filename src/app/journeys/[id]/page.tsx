@@ -13,6 +13,7 @@ import { DecodedInline } from "@/components/hrdf/decoded-fields";
 import { FplanRecordFields } from "@/components/hrdf/fplan-record";
 import { holidays } from "@/lib/hrdf/holidays";
 import { NoData, PageHeader, Section } from "@/components/page";
+import { getLang } from "@/lib/lang";
 import { cn } from "@/lib/utils";
 
 export async function generateMetadata({ params }: PageProps<"/journeys/[id]">): Promise<Metadata> {
@@ -22,6 +23,16 @@ export async function generateMetadata({ params }: PageProps<"/journeys/[id]">):
 }
 
 const pad7 = (n: number) => String(n).padStart(7, "0");
+
+/** RV §4.3: what negative arrival/departure times mean for a route line. */
+function stopUsage(s: { arr: number | null; dep: number | null; flags: number }): string {
+  const an = (s.flags & 1) === 1;
+  const dn = (s.flags & 2) === 2;
+  if (an && dn) return s.arr === s.dep ? "transit, no stop" : "service stop (not public)";
+  if (an) return "pick-up only";
+  if (dn) return "drop-off only";
+  return "";
+}
 
 function T({ min, neg }: { min: number | null; neg: boolean }) {
   if (min === null) return <span className="text-muted-foreground/40">—</span>;
@@ -37,7 +48,8 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
   if (!hasDb()) return <NoData />;
   const id = Number((await params).id);
   const sp = await searchParams;
-  const data = Number.isFinite(id) ? getJourney(id) : null;
+  const lang = await getLang();
+  const data = Number.isFinite(id) ? getJourney(id, lang) : null;
   if (!data) notFound();
   const { journey: j, stops, records, raw, variants, tracks, operator, category, lineInfo, sjyid, direction } = data;
   const c = cache();
@@ -55,7 +67,7 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
 
   const trackAt = (stop: number, time: number | null) => {
     const hit = tracks.find((t) => t.stop === stop && (t.time === null || t.time === time || (time !== null && t.time === time % 1440)) && runsOn(t.bitfield, day));
-    return hit ? hit.label ?? hit.ref : null;
+    return hit?.label || null;
   };
   const sectionVe = records.filter((r) => r.type === "*A" && r.code === "VE");
 
@@ -130,6 +142,7 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
             <dt className="eyebrow !text-[9.5px]">Direction</dt>
             <dd className="text-sm text-foreground">
               {j.dir === "R" ? "Return (R)" : j.dir === "H" ? "Outbound (H)" : "—"}
+              {!j.dir_code && j.dir ? <span className="block text-xs">towards {stops[stops.length - 1]?.name} (no code = last stop)</span> : null}
               {direction ? (
                 <Link href={`/ref/direction/${j.dir_code}`} className="link-u ml-1 block text-xs">
                   {j.dir_code}: {direction}
@@ -213,19 +226,17 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
                       {s.name}
                     </Link>
                     <span className="ml-2 font-mono text-[11px] text-muted-foreground">{pad7(s.stop)}</span>
-                    {pseudo ? <span className="ml-2 text-[11px] text-muted-foreground italic">pass-through point</span> : null}
+                    {pseudo ? <span className="ml-2 text-[11px] text-muted-foreground italic">fictional via point</span> : null}
+                    {stopUsage(s) ? <span className="ml-2 text-[11px] text-muted-foreground sm:hidden">{stopUsage(s)}</span> : null}
                   </span>
-                  <span className="hidden font-mono text-[11px] text-muted-foreground sm:block">
-                    {s.flags & 1 ? "no alighting " : ""}
-                    {s.flags & 2 ? "no boarding" : ""}
-                  </span>
-                  <span className="text-right text-sm font-bold">{track ? <span title="Track (GLEISE)">Pl. {track}</span> : null}</span>
+                  <span className="hidden font-mono text-[11px] text-muted-foreground sm:block">{stopUsage(s)}</span>
+                  <span className="text-right text-sm font-bold whitespace-nowrap">{track ? <span title="Track (GLEISE)">Pl. {track}</span> : null}</span>
                 </li>
               );
             })}
           </ol>
           <p className="mt-4 text-xs text-muted-foreground">
-            Times are HRDF HHHMM relative to the operating day; values ≥ 24:00 are shown with +1. Struck-through times are negative in HRDF (no boarding / alighting). Tracks are resolved from GLEISE for {formatDate(date)}.
+            Times are HRDF HHHMM relative to the operating day; values ≥ 24:00 are shown with +1. Struck-through times are negative in HRDF: arrival only = pick-up only, departure only = drop-off only, both equal = transit without stop, both different = service stop (RV §4.3). Tracks are resolved from GLEISE for {formatDate(date)}.
           </p>
         </div>
       ) : null}
@@ -233,11 +244,27 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
       {tab === "days" ? (
         <div className="mt-6">
           {sectionVe.length > 1 ? (
-            <p className="mb-4 rounded-md border bg-card p-3 text-sm">
-              This journey has {sectionVe.length} *A VE lines restricted to sections; the calendar shows bitfield {j.bitfield ?? "daily"} (the one covering the first stop). See the Records tab for the others.
-            </p>
-          ) : null}
-          <OperatingCalendar days={days} period={period} highlight={iso} holidays={holidays()} hrefForDate={(d) => link({ date: d })} />
+            <div className="space-y-8">
+              <p className="rounded-md border-l-4 border-board-accent bg-card p-3 text-sm">
+                Operating days differ per section: this journey has {sectionVe.length} *A VE lines. Departure boards use the bitfield that covers each stop.
+              </p>
+              {sectionVe.map((v) => {
+                const vb = v.bitfield ? c.bitfields.get(v.bitfield) : null;
+                return (
+                  <div key={v.idx}>
+                    <div className="mb-3 flex flex-wrap items-baseline gap-2 text-sm">
+                      <span className="font-semibold">{v.fromName ?? "first stop"} → {v.toName ?? "last stop"}</span>
+                      {v.bitfield ? <Link className="link-u font-mono" href={`/bitfields/${v.bitfield}`}>bitfield {v.bitfield}</Link> : <span className="font-mono">daily</span>}
+                      <span className="text-muted-foreground">{vb?.count ?? period.days} days · {runsOn(v.bitfield, day) ? "runs" : "does not run"} on {iso}</span>
+                    </div>
+                    <OperatingCalendar days={vb ? vb.days : bitfieldDays("F".repeat(96), period.days)} period={period} highlight={iso} holidays={holidays()} hrefForDate={(d) => link({ date: d })} />
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <OperatingCalendar days={days} period={period} highlight={iso} holidays={holidays()} hrefForDate={(d) => link({ date: d })} />
+          )}
           <div className="mt-4 flex flex-wrap gap-4 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5"><span className="size-3 rounded-sm bg-run" /> runs</span>
             <span className="flex items-center gap-1.5"><span className="size-3 rounded-sm bg-muted" /> does not run</span>

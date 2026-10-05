@@ -2,6 +2,8 @@ import Link from "next/link";
 import { Search } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { NavLinks } from "@/components/nav-links";
+import { LangSelect } from "@/components/lang-select";
+import { getLang } from "@/lib/lang";
 
 export function Brand() {
   return (
@@ -19,7 +21,8 @@ export function Brand() {
   );
 }
 
-export function SiteHeader() {
+export async function SiteHeader() {
+  const lang = await getLang();
   return (
     <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-[1400px] items-center gap-4 px-4 sm:px-6">
@@ -35,6 +38,7 @@ export function SiteHeader() {
             />
           </label>
         </form>
+        <LangSelect lang={lang} />
         <ThemeToggle />
       </div>
       <div className="h-[3px] bg-primary" />

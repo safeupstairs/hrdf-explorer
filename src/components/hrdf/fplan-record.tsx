@@ -35,7 +35,7 @@ export function fplanFields(p: ParsedFplanLine, fromName?: string | null, toName
   const out: Field[] = [];
   for (const [k, v] of Object.entries(p.fields)) {
     if (!v) continue;
-    const label = LABELS[k] ?? k;
+    const label = k === "minutes" && p.type === "*CO" ? "Buffer minutes (not shown to passengers)" : k === "minutes" && p.type === "*CI" ? "Check-in minutes" : LABELS[k] ?? k;
     if (k === "fromStop" || k === "toStop" || k === "stop" || k === "lastStopBefore" || k === "firstStopAfter" || k === "borderPoint") {
       const nm = k === "fromStop" ? fromName : k === "toStop" ? toName : null;
       out.push({ label, value: nm ? `${v} ${nm}` : v, link: { kind: "station", id: String(Number(v)) }, mono: true });

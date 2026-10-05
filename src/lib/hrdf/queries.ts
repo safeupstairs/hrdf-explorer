@@ -1,7 +1,7 @@
 import "server-only";
 import { inflateRawSync } from "node:zlib";
 import { db } from "@/lib/db";
-import { cache, categoryFor, lineInfo, operatorFor, runsOn } from "./lookups";
+import { bitfieldAtStop, cache, categoryIn, lineInfo, runsOn, texts, type Lang } from "./lookups";
 import { parseFplanLine } from "./fplan";
 import { decodeLine } from "./decoders";
 
@@ -138,10 +138,14 @@ export function trackDefs(stop: number) {
   return db().prepare("SELECT file, ref, kind, value FROM gleis_def WHERE stop = ? ORDER BY ref, file").all(stop) as { file: string; ref: string; kind: string; value: string }[];
 }
 
+/** Track name (G + optional T + A); GLEISE `G ''` has no name, so fall back to the quay SLOID suffix. */
 function trackLabel(stop: number, ref: string): string | null {
-  const r = db().prepare("SELECT value FROM gleis_def WHERE stop = ? AND ref = ? AND kind = 'G' LIMIT 1").get(stop, ref) as { value: string } | undefined;
-  if (!r) return null;
-  return r.value.replace(/^'|'$/g, "") || null;
+  const rows = db().prepare("SELECT kind, value FROM gleis_def WHERE stop = ? AND ref = ? AND kind IN ('G', 'A', 'T', 'g')").all(stop, ref) as { kind: string; value: string }[];
+  const val = (k: string) => rows.find((r) => r.kind === k)?.value.replace(/^'|'$/g, "") ?? "";
+  const name = `${val("G")}${val("T")}${val("A")}`;
+  if (name) return name;
+  const sloid = val("g").split(/\s+/).pop();
+  return sloid ? `…${sloid.split(":").slice(-2).join(":")}` : null;
 }
 
 /** Track ref for a journey at a stop on a given day (GLEISE assignments are keyed by journey number + admin + optional time / bitfield). */
@@ -183,18 +187,29 @@ export function board(stop: number, day: number, from: number, to: number, mode:
   );
   type R = JourneyRow & { seq: number; t: number; flags: number };
   const out: Omit<BoardEntry, "terminus" | "origin" | "track">[] = [];
+  const c = cache();
+  const stopSeqCache = new Map<number, number[]>();
+  const effectiveBitfield = (r: R) => {
+    if (!c.multiVe.has(r.id)) return r.bitfield;
+    let seq = stopSeqCache.get(r.id);
+    if (!seq) {
+      seq = (d.prepare("SELECT stop FROM stops WHERE journey = ? ORDER BY seq").all(r.id) as { stop: number }[]).map((x) => x.stop);
+      stopSeqCache.set(r.id, seq);
+    }
+    return bitfieldAtStop(r.id, r.seq - 1, seq, r.bitfield);
+  };
   for (const shift of [0, -1]) {
     const a = from - shift * 1440;
     const b = to - shift * 1440;
     const serviceDay = day + shift;
     for (const r of base.all(stop, a, b) as R[]) {
       if (r.flags & negFlag) continue;
-      if (!runsOn(r.bitfield, serviceDay)) continue;
+      if (!runsOn(effectiveBitfield(r), serviceDay)) continue;
       out.push({ journey: r, time: r.t + shift * 1440, serviceDayShift: shift, cycle: 0, seq: r.seq, flags: r.flags });
     }
     for (const r of cyc.all(stop, b, a) as R[]) {
       if (r.flags & negFlag) continue;
-      if (!runsOn(r.bitfield, serviceDay)) continue;
+      if (!runsOn(effectiveBitfield(r), serviceDay)) continue;
       for (let k = 1; k <= (r.takt_n ?? 0); k++) {
         const t = r.t + k * (r.takt_min ?? 0);
         if (t >= a && t <= b) out.push({ journey: r, time: t + shift * 1440, serviceDayShift: shift, cycle: k, seq: r.seq, flags: r.flags });
@@ -274,7 +289,7 @@ export function searchJourneys(f: JourneyFilter, limit = 100, offset = 0): { row
   };
 }
 
-export function infotext(id: number, lang = "EN"): string | null {
+export function infotext(id: number, lang: string = "EN"): string | null {
   const d = db();
   for (const f of [`INFOTEXT_${lang}`, "INFOTEXT_DE", "INFOTEXT"]) {
     const r = d.prepare("SELECT text FROM lines WHERE key = ? AND file = ?").get(String(id), f) as { text: string } | undefined;
@@ -287,7 +302,7 @@ export function infotextAll(id: number) {
   return db().prepare("SELECT file, text FROM lines WHERE key = ? AND file LIKE 'INFOTEXT%' ORDER BY file").all(String(id)) as { file: string; text: string }[];
 }
 
-export function getJourney(id: number) {
+export function getJourney(id: number, lang: Lang = "EN") {
   const d = db();
   const j = d.prepare(`SELECT ${JOURNEY_COLS}, j.raw FROM journeys j WHERE j.id = ?`).get(id) as (JourneyRow & { raw: Buffer }) | undefined;
   if (!j) return null;
@@ -300,18 +315,19 @@ export function getJourney(id: number) {
   const stations = d.prepare(`SELECT id, lon, lat FROM stations WHERE id IN (${stops.map(() => "?").join(",") || "NULL"})`).all(...stops.map((s) => s.stop)) as { id: number; lon: number | null; lat: number | null }[];
   const coords = new Map(stations.map((s) => [s.id, s]));
   const c = cache();
+  const t = texts(lang);
   const records = jl.map((l) => {
     const p = parseFplanLine(l.text);
     let resolved: string | null = null;
-    if (l.type === "*I" && l.ref) resolved = infotext(Number(l.ref));
-    if (l.type === "*A" && l.code) resolved = c.attributes.get(l.code) ?? null;
+    if (l.type === "*I" && l.ref) resolved = infotext(Number(l.ref), lang);
+    if (l.type === "*A" && l.code) resolved = t.attributes.get(l.code) ?? null;
     if (l.type === "*R" && l.ref) resolved = c.directions.get(l.ref) ?? null;
     if (l.type === "*L" && l.ref?.startsWith("#")) {
       const li = lineInfo(Number(l.ref.slice(1)));
       resolved = li ? [li.name, li.longName, li.description].filter(Boolean).join(" · ") : null;
     }
     if (l.type === "*G" && l.code) {
-      const cat = categoryFor(l.code);
+      const cat = categoryIn(l.code, lang);
       resolved = cat ? [cat.label, cat.classLabel].filter(Boolean).join(" · ") : null;
     }
     return { ...l, parsed: p, resolved, fromName: names.get(l.from_stop ?? -1) ?? null, toName: names.get(l.to_stop ?? -1) ?? null };
@@ -338,8 +354,8 @@ export function getJourney(id: number) {
     records,
     variants,
     tracks: tracks.map((t) => ({ ...t, label: trackLabels.get(`${t.stop}|${t.ref}`) ?? null })),
-    operator: operatorFor(j.admin),
-    category: categoryFor(j.category),
+    operator: t.operatorsByAdmin.get(j.admin) ?? null,
+    category: categoryIn(j.category, lang),
     lineInfo: lineInfo(j.line_ref),
     sjyid: j.jy !== null ? infotext(j.jy, "DE") : null,
     direction: j.dir_code ? c.directions.get(j.dir_code) ?? null : null,
@@ -491,4 +507,16 @@ export interface StopLine {
 
 export function lineOffset(file: string, n: number): number {
   return (db().prepare("SELECT COUNT(*) c FROM lines WHERE file = ? AND n < ?").get(file, n) as { c: number }).c;
+}
+
+export function stationExtras(id: number, lang: Lang = "EN") {
+  const rows = db().prepare("SELECT text FROM lines WHERE file = 'BHFART' AND key = ?").all(String(id)) as { text: string }[];
+  const quays: string[] = [];
+  const infos: { code: string; nr: number; text: string | null }[] = [];
+  for (const r of rows) {
+    const [, type, sub, value] = r.text.split("%")[0].trim().split(/\s+/);
+    if (type === "G" && sub === "a" && value) quays.push(value);
+    if (type === "I" && value) infos.push({ code: sub, nr: Number(value), text: infotext(Number(value), lang) });
+  }
+  return { quays, infos };
 }

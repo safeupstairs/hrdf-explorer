@@ -1,6 +1,7 @@
 import "server-only";
 import { db } from "@/lib/db";
 import { bitfieldDays, parseHrdfDate, type Period } from "./calendar";
+import { quotedValues } from "./decoders";
 
 interface LineInfo {
   id: number;
@@ -37,6 +38,9 @@ interface Cache {
   categories: Map<string, Category>;
   attributes: Map<string, string>;
   directions: Map<string, string>;
+  catByNo: Map<number, string>;
+  /** Journeys with more than one *A VE line (operating days vary per section). */
+  multiVe: Map<number, { from: number | null; to: number | null; bitfield: number | null }[]>;
 }
 
 const g = globalThis as unknown as { __hrdfCache?: Cache };
@@ -97,9 +101,9 @@ export function cache(): Cache {
       const key = r.text.slice(0, 5).trim();
       const rest = r.text.slice(6).trim();
       const op = operators.get(key) ?? { key, admins: [] };
-      const m = rest.match(/K "([^"]*)"\s*L "([^"]*)"\s*V "([^"]*)"/);
-      if (m) Object.assign(op, { short: m[1], abbr: m[2], name: m[3] });
-      else if (rest.startsWith("N")) op.sboid = rest.slice(1).trim().replace(/"/g, "");
+      const v = quotedValues(rest);
+      if (v.K !== undefined) Object.assign(op, { short: v.K, abbr: v.L, name: v.V });
+      else if (rest.startsWith("N ")) op.sboid = rest.slice(1).trim().replace(/["']/g, "");
       else if (rest.startsWith(":")) op.admins.push(...rest.slice(1).trim().split(/\s+/));
       operators.set(key, op);
     }
@@ -154,6 +158,8 @@ export function cache(): Cache {
     categories,
     attributes,
     directions,
+    catByNo,
+    multiVe: loadMultiVe(),
   };
   return g.__hrdfCache;
 }
@@ -179,4 +185,97 @@ export function operatorFor(admin: string): Operator | null {
 export function categoryFor(code: string | null): Category | null {
   if (!code) return null;
   return cache().categories.get(code) ?? null;
+}
+
+function loadMultiVe() {
+  const m = new Map<number, { from: number | null; to: number | null; bitfield: number | null }[]>();
+  const rows = db()
+    .prepare(
+      `SELECT journey, from_stop, to_stop, bitfield FROM jlines WHERE type = '*A' AND code = 'VE' AND journey IN
+         (SELECT journey FROM jlines WHERE type = '*A' AND code = 'VE' GROUP BY journey HAVING COUNT(*) > 1) ORDER BY journey, idx`,
+    )
+    .all() as { journey: number; from_stop: number | null; to_stop: number | null; bitfield: number | null }[];
+  for (const r of rows) m.set(r.journey, [...(m.get(r.journey) ?? []), { from: r.from_stop, to: r.to_stop, bitfield: r.bitfield || null }]);
+  return m;
+}
+
+/**
+ * Resolves the operating-day bitfield that applies at a given stop index for
+ * journeys whose *A VE differs per section. From-stops match the first
+ * occurrence, to-stops the last (HRDF range rules, ignoring time disambiguation).
+ */
+export function bitfieldAtStop(journey: number, stopIndex: number, stops: number[], fallback: number | null): number | null {
+  const ves = cache().multiVe.get(journey);
+  if (!ves) return fallback;
+  for (const v of ves) {
+    const a = v.from === null ? 0 : stops.indexOf(v.from);
+    const b = v.to === null ? stops.length - 1 : stops.lastIndexOf(v.to);
+    if (a >= 0 && b >= 0 && stopIndex >= a && stopIndex <= b) return v.bitfield;
+  }
+  return fallback;
+}
+
+export type Lang = "DE" | "FR" | "IT" | "EN";
+export const LANGS: Lang[] = ["DE", "FR", "IT", "EN"];
+const ATTR_SECTION: Record<Lang, RegExp> = { DE: /^deu$/i, FR: /^fra$/i, IT: /^ita$/i, EN: /^eng$/i };
+const ZUG_SECTION: Record<Lang, RegExp> = { DE: /^Deutsch$/i, FR: /^Franz/i, IT: /^Italien/i, EN: /^Englisch$/i };
+
+interface Texts {
+  attributes: Map<string, string>;
+  catLabels: Map<string, string>;
+  classLabels: Map<number, string>;
+  operatorsByAdmin: Map<string, Operator>;
+}
+
+/** Language-dependent texts from ATTRIBUT, ZUGART and BETRIEB_xx. */
+export function texts(lang: Lang): Texts {
+  const store = globalThis as unknown as { __hrdfTexts?: Partial<Record<Lang, Texts>> };
+  store.__hrdfTexts ??= {};
+  const hit = store.__hrdfTexts[lang];
+  if (hit) return hit;
+  const c = cache();
+  const attributes = new Map<string, string>();
+  for (const r of rows("ATTRIBUT%")) if (r.section && ATTR_SECTION[lang].test(r.section)) attributes.set(r.text.slice(0, 3).trim(), r.text.slice(4).trim());
+  const catLabels = new Map<string, string>();
+  const classLabels = new Map<number, string>();
+  for (const r of rows("ZUGART")) {
+    if (!r.section || !ZUG_SECTION[lang].test(r.section)) continue;
+    const m = r.text.match(/^(class|category)(\d+)\s+(.*)$/);
+    if (m && m[1] === "class") classLabels.set(Number(m[2]), m[3]);
+    if (m && m[1] === "category") {
+      const code = c.catByNo.get(Number(m[2]));
+      if (code) catLabels.set(code, m[3]);
+    }
+  }
+  const operatorsByAdmin = new Map<string, Operator>();
+  const file = pickFile("BETRIEB", [`_${lang}`, "_DE", ""]);
+  if (file) {
+    const ops = new Map<string, Operator>();
+    for (const r of rows(file)) {
+      const key = r.text.slice(0, 5).trim();
+      const rest = r.text.slice(6).trim();
+      const op = ops.get(key) ?? { key, admins: [] };
+      const v = quotedValues(rest);
+      if (v.K !== undefined) Object.assign(op, { short: v.K, abbr: v.L, name: v.V });
+      else if (rest.startsWith("N ")) op.sboid = rest.slice(1).trim().replace(/["']/g, "");
+      else if (rest.startsWith(":")) op.admins.push(...rest.slice(1).trim().split(/\s+/));
+      ops.set(key, op);
+    }
+    for (const op of ops.values()) for (const a of op.admins) if (!operatorsByAdmin.has(a)) operatorsByAdmin.set(a, op);
+  }
+  const t = {
+    attributes: attributes.size ? attributes : c.attributes,
+    catLabels,
+    classLabels,
+    operatorsByAdmin: operatorsByAdmin.size ? operatorsByAdmin : c.operatorsByAdmin,
+  };
+  store.__hrdfTexts[lang] = t;
+  return t;
+}
+
+export function categoryIn(code: string | null, lang: Lang): Category | null {
+  const base = categoryFor(code);
+  if (!base) return null;
+  const t = texts(lang);
+  return { ...base, label: t.catLabels.get(base.code) ?? base.label, classLabel: t.classLabels.get(base.productClass) ?? base.classLabel };
 }

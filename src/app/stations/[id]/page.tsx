@@ -3,7 +3,8 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { ExternalLink, TrainFront } from "lucide-react";
 import { hasDb } from "@/lib/db";
-import { board, getStation, metaGroups, stationMentions, stationNames, trackDefs } from "@/lib/hrdf/queries";
+import { board, getStation, metaGroups, stationExtras, stationMentions, stationNames, trackDefs } from "@/lib/hrdf/queries";
+import { getLang } from "@/lib/lang";
 import { cache } from "@/lib/hrdf/lookups";
 import { addDays, dayIndex, defaultDate, formatDate, fromIsoDate, minutesToTime, parseTimeInput, toIsoDate } from "@/lib/hrdf/calendar";
 import { decodeLine } from "@/lib/hrdf/decoders";
@@ -38,6 +39,7 @@ export default async function StationPage({ params, searchParams }: PageProps<"/
   const inPeriod = day >= 0 && day < period.days;
   const entries = inPeriod ? board(id, day, from, to, mode, 150) : [];
   const mentions = stationMentions(id);
+  const extras = stationExtras(id, await getLang());
   const meta = metaGroups(id);
   const defs = trackDefs(id);
   const tracks = new Map<string, { label?: string; sloid?: string; coords?: string[] }>();
@@ -76,8 +78,10 @@ export default async function StationPage({ params, searchParams }: PageProps<"/
             ["WGS84", s.lat !== null ? `${s.lat}, ${s.lon}` : null],
             ["LV95", s.e !== null ? `${s.e} / ${s.n}` : null],
             ["Altitude", s.alt !== null ? `${s.alt} m` : null],
+            ...extras.infos.map((i) => [i.code === "KT" ? "Canton (BHFART I KT)" : `Info ${i.code}`, i.text ?? i.nr]),
+            ["UIC country / DiDok", `${String(s.id).padStart(7, "0").slice(0, 2)} / ${String(s.id).padStart(7, "0").slice(2)}`],
             ["Transfer prio (BFPRIOS)", s.prio],
-            ["KMINFO", s.kminfo],
+            ["KMINFO", s.kminfo === 30000 ? "30000 (transfer point)" : s.kminfo === 0 ? "0 (no transfers)" : s.kminfo],
           ]
             .filter(([, v]) => v !== null && v !== undefined)
             .map(([k, v]) => (
@@ -159,13 +163,22 @@ export default async function StationPage({ params, searchParams }: PageProps<"/
       </Section>
 
       <div className="grid gap-x-10 lg:grid-cols-2">
+        {extras.quays.length ? (
+          <Section title={`Quays (${extras.quays.length})`} aside="BHFART G a">
+            <div className="flex flex-wrap gap-1.5">
+              {extras.quays.map((q) => (
+                <span key={q} className="rounded-sm border bg-card px-1.5 py-0.5 font-mono text-[11px]">{q}</span>
+              ))}
+            </div>
+          </Section>
+        ) : null}
         {tracks.size ? (
           <Section title="Tracks / platforms" aside="GLEISE">
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {[...tracks.entries()].map(([ref, t]) => (
                 <div key={ref} className="rounded-md border bg-card p-2.5">
                   <div className="flex items-baseline justify-between">
-                    <span className="text-lg font-bold">{t.label || "—"}</span>
+                    <span className={cn("font-bold", t.label ? "text-lg" : "text-sm text-muted-foreground")}>{t.label || "unnamed"}</span>
                     <span className="font-mono text-[11px] text-muted-foreground">{ref}</span>
                   </div>
                   {t.sloid ? <div className="truncate font-mono text-[10.5px] text-muted-foreground">{t.sloid}</div> : null}

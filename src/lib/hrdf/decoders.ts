@@ -40,7 +40,9 @@ export interface Decoded {
 const c = (l: string, from: number, to?: number) => l.slice(from - 1, to).trim();
 
 const st = (label: string, v: string): Field =>
-  v && /^\d{1,7}$/.test(v) ? { label, value: v.padStart(7, "0"), link: { kind: "station", id: String(Number(v)) }, mono: true } : { label, value: v, mono: true };
+  v === "@@@@@@@"
+    ? { label, value: "@@@@@@@ (all stops)", mono: true }
+    : v && /^\d{1,7}$/.test(v) ? { label, value: v.padStart(7, "0"), link: { kind: "station", id: String(Number(v)) }, mono: true } : { label, value: v, mono: true };
 const bf = (label: string, v: string): Field =>
   v && /^\d+$/.test(v) && Number(v) !== 0
     ? { label, value: v, link: { kind: "bitfield", id: String(Number(v)) }, mono: true }
@@ -70,6 +72,13 @@ function comment(line: string): { body: string; note: string } {
   const i = line.indexOf("%");
   if (i < 0) return { body: line, note: "" };
   return { body: line.slice(0, i), note: line.slice(i + 1).trim() };
+}
+
+/** Parses `K "a" L 'b' V "c d"` into {K, L, V}; values may use either quote style. */
+export function quotedValues(s: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of s.matchAll(/([A-Z])\s+(?:"([^"]*)"|'([^']*)')/g)) out[m[1]] = m[2] ?? m[3] ?? "";
+  return out;
 }
 
 const LANG_SECTION = /^<(deu|fra|ita|eng|Deutsch|Englisch|Franzoesisch|Französisch|Italienisch|text)>$/i;
@@ -275,9 +284,9 @@ const decoders: Record<string, DecoderFn> = {
       const admins = rest.slice(1).trim().split(/\s+/);
       return { kind: "operator-admins", fields: [txt("Operator", key, true), txt("Record", "Administration numbers"), ...admins.map((a, i) => adm(`Admin ${i + 1}`, a))] };
     }
-    if (rest.startsWith("N")) return { kind: "operator-sboid", fields: [txt("Operator", key, true), txt("Record", "Business org. ID (SBOID)"), txt("SBOID", rest.slice(1).trim().replace(/"/g, ""), true)] };
-    const m = rest.match(/K "([^"]*)"\s*L "([^"]*)"\s*V "([^"]*)"/);
-    if (m) return { kind: "operator-names", fields: [txt("Operator", key, true), txt("Short", m[1], true), txt("Abbreviation", m[2], true), txt("Full name", m[3])] };
+    if (rest.startsWith("N ")) return { kind: "operator-sboid", fields: [txt("Operator", key, true), txt("Record", "Business org. ID (SBOID)"), txt("SBOID", rest.slice(1).trim().replace(/["']/g, ""), true)] };
+    const v = quotedValues(rest);
+    if (v.K !== undefined) return { kind: "operator-names", fields: [txt("Operator", key, true), txt("Short", v.K, true), txt("Abbreviation", v.L ?? "", true), txt("Full name", v.V ?? "")] };
     return { kind: "operator", fields: [txt("Operator", key, true), txt("Value", rest)] };
   },
 
@@ -308,6 +317,10 @@ const decoders: Record<string, DecoderFn> = {
   },
 
   ATTRIBUT(line, section) {
+    if (line.startsWith("#")) {
+      const a = (label: string, v: string): Field => (v && v !== "--" ? { label, value: v, link: { kind: "attribute", id: v }, mono: true } : txt(label, v === "--" ? "-- (suppressed)" : v, true));
+      return { kind: "attribute-output", fields: [txt("Record", "Output rule"), a("Attribute", c(line, 3, 4)), a("Partial section", c(line, 6, 7)), a("Full section", c(line, 9, 10))] };
+    }
     if (section) {
       const code = c(line, 1, 3);
       return { kind: "attribute-text", fields: [{ label: "Attribute", value: code, link: { kind: "attribute", id: code }, mono: true }, txt("Language", section), txt("Text", line.slice(4).trim())] };
@@ -345,12 +358,15 @@ const decoders: Record<string, DecoderFn> = {
     const { body, note } = comment(line);
     const t = body.trim().split(/\s+/).filter(Boolean);
     if (!t.length) return { kind: "comment", fields: [txt("Comment", note || line.trim())] };
+    if (t.length === 2 && /^\d{7}$/.test(t[1])) {
+      return { kind: "timezone-copy", fields: [st("Stop / region", t[0]), st("Uses rules of", t[1]), ...(note ? [txt("Comment", note)] : [])] };
+    }
     const fields: Field[] = [/^\d{7}$/.test(t[0]) ? st("Stop / region", t[0]) : txt("Key", t[0], true), txt("Offset", t[1] ?? "", true)];
     for (let i = 2, k = 1; i + 4 < t.length + 1 && t[i]; i += 5, k++) {
       fields.push(txt(`Summer ${k} offset`, t[i], true), txt(`From`, `${t[i + 1] ?? ""} ${t[i + 2] ?? ""}`, true), txt(`Until`, `${t[i + 3] ?? ""} ${t[i + 4] ?? ""}`, true));
     }
     if (note) fields.push(txt("Comment", note));
-    if (section) fields.push(txt("Section", section));
+    void section;
     return { kind: "timezone", fields };
   },
 
