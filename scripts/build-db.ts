@@ -50,6 +50,7 @@ CREATE INDEX journeys_admin ON journeys(admin);
 CREATE INDEX journeys_bitfield ON journeys(bitfield);
 CREATE INDEX journeys_cat_line ON journeys(category, line);
 CREATE INDEX journeys_line_ref ON journeys(line_ref);
+CREATE INDEX journeys_takt ON journeys(takt_n) WHERE takt_n > 0;
 CREATE INDEX stops_stop_dep ON stops(stop, dep);
 CREATE INDEX stops_stop_arr ON stops(stop, arr);
 CREATE INDEX jlines_type_code ON jlines(type, code);
