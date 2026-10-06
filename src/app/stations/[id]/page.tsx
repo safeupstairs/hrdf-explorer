@@ -5,7 +5,7 @@ import { ExternalLink, TrainFront } from "lucide-react";
 import { hasDb } from "@/lib/db";
 import { board, getStation, metaGroups, stationExtras, stationMentions, stationNames, trackDefs } from "@/lib/hrdf/queries";
 import { getLang } from "@/lib/lang";
-import { cache } from "@/lib/hrdf/lookups";
+import { cache, texts } from "@/lib/hrdf/lookups";
 import { addDays, dayIndex, defaultDate, formatDate, fromIsoDate, minutesToTime, parseTimeInput, toIsoDate } from "@/lib/hrdf/calendar";
 import { decodeLine } from "@/lib/hrdf/decoders";
 import { qs } from "@/lib/links";
@@ -39,7 +39,9 @@ export default async function StationPage({ params, searchParams }: PageProps<"/
   const inPeriod = day >= 0 && day < period.days;
   const entries = inPeriod ? board(id, day, from, to, mode, 150) : [];
   const mentions = stationMentions(id);
-  const extras = stationExtras(id, await getLang());
+  const lang = await getLang();
+  const extras = stationExtras(id, lang);
+  const attrLabels = texts(lang).attributes;
   const meta = metaGroups(id);
   const defs = trackDefs(id);
   const tracks = new Map<string, { label?: string; sloid?: string; coords?: string[] }>();
@@ -178,7 +180,7 @@ export default async function StationPage({ params, searchParams }: PageProps<"/
               {[...tracks.entries()].map(([ref, t]) => (
                 <div key={ref} className="rounded-md border bg-card p-2.5">
                   <div className="flex items-baseline justify-between">
-                    <span className={cn("font-bold", t.label ? "text-lg" : "text-sm text-muted-foreground")}>{t.label || "unnamed"}</span>
+                    <span className={cn("font-bold", t.label ? "text-lg" : "text-sm text-muted-foreground")}>{t.label || "no track name"}</span>
                     <span className="font-mono text-[11px] text-muted-foreground">{ref}</span>
                   </div>
                   {t.sloid ? <div className="truncate font-mono text-[10.5px] text-muted-foreground">{t.sloid}</div> : null}
@@ -213,6 +215,15 @@ export default async function StationPage({ params, searchParams }: PageProps<"/
                   <Link className="link-u" href={`/stations/${t.from}`}>{groupNames.get(t.from) ?? pad7(t.from)}</Link>→
                   <Link className="link-u" href={`/stations/${t.to}`}>{groupNames.get(t.to) ?? pad7(t.to)}</Link>
                   <span className="font-mono text-xs">{t.minutes} min</span>
+                  {t.attributes.length ? (
+                    <span className="flex flex-wrap gap-1">
+                      {t.attributes.map((a) => (
+                        <Link key={a} href={`/ref/attribute/${encodeURIComponent(a)}`} title={attrLabels.get(a)} className="rounded-sm border bg-card px-1 py-px font-mono text-[10px] text-muted-foreground hover:text-foreground">
+                          *A {a}{attrLabels.get(a) ? ` · ${attrLabels.get(a)}` : ""}
+                        </Link>
+                      ))}
+                    </span>
+                  ) : null}
                 </li>
               ))}
             </ul>

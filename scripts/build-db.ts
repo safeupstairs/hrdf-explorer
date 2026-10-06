@@ -13,6 +13,7 @@ import { deflateRawSync } from "node:zlib";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { parseFplanLine, parseHrdfTime } from "../src/lib/hrdf/fplan";
+import { bitfieldDays, parseHrdfDate } from "../src/lib/hrdf/calendar";
 import { baseName, decodeLine, isSectionHeader, lineKey } from "../src/lib/hrdf/decoders";
 
 const zipPath = path.resolve(process.argv[2] ?? process.env.HRDF_ZIP ?? "data/hrdf.zip");
@@ -221,12 +222,11 @@ async function main() {
         } else insMeta.run("header", line.trim());
         break;
       }
+      case "BITFIELD":
       case "BITFELD": {
         const [id, hex] = line.trim().split(/\s+/);
         if (!hex) break;
-        let days = 0;
-        for (const ch of hex) days += popcount(parseInt(ch, 16));
-        insBitfield.run(Number(id), hex, days);
+        insBitfield.run(Number(id), hex, 0);
         break;
       }
       case "BAHNHOF": {
@@ -281,6 +281,19 @@ async function main() {
 
   db.exec("COMMIT");
 
+  const startMeta = db.prepare("SELECT value FROM meta WHERE key='start'").get() as { value: string } | undefined;
+  const endMeta = db.prepare("SELECT value FROM meta WHERE key='end'").get() as { value: string } | undefined;
+  if (startMeta && endMeta) {
+    const nDays = Math.round((parseHrdfDate(endMeta.value).getTime() - parseHrdfDate(startMeta.value).getTime()) / 86400000) + 1;
+    const upd = db.prepare("UPDATE bitfields SET days = ? WHERE id = ?");
+    db.transaction(() => {
+      for (const r of db.prepare("SELECT id, hex FROM bitfields").all() as { id: number; hex: string }[]) {
+        upd.run(bitfieldDays(r.hex, nDays).filter(Boolean).length, r.id);
+      }
+    })();
+    log(`Bitfield operating-day counts (skipping 2-bit padding) for ${nDays} days`);
+  }
+
   log(`Writing ${stations.size.toLocaleString()} stations`);
   const insStation = db.prepare(
     "INSERT INTO stations(id,name,name_norm,long_name,abbr,synonyms,lon,lat,alt,e,n,prio,kminfo,sloid,country) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -328,15 +341,6 @@ function splitZeitvs(raw: string): string[] {
     out.push(note ? `${m[1]} % ${note}` : m[1]);
   }
   return out;
-}
-
-function popcount(n: number) {
-  let c = 0;
-  while (n) {
-    c += n & 1;
-    n >>= 1;
-  }
-  return c;
 }
 
 async function importFplan(

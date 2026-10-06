@@ -2,8 +2,9 @@ import "server-only";
 import { db } from "@/lib/db";
 import { bitfieldDays, parseHrdfDate, type Period } from "./calendar";
 import { quotedValues } from "./decoders";
+import { parseFplanLine, resolveRange, veBitfieldAtStop, type RouteStop } from "./fplan";
 
-interface LineInfo {
+export interface LineInfo {
   id: number;
   name?: string;
   longName?: string;
@@ -11,6 +12,28 @@ interface LineInfo {
   slnid?: string;
   fg?: string;
   bg?: string;
+  /** LINIE type H: id of the main line this partial line belongs to. */
+  mainLine?: number;
+}
+
+export interface AttrDef {
+  code: string;
+  /** 0 = section; 1 = boarding, 2 = alighting, 4 = intermediate (summable). */
+  relevance: number;
+  priority: number;
+  sort: number;
+  /** Code to output on a partial section (`--` = suppress). */
+  partialOut: string | null;
+  /** Code to output when the attribute covers the whole journey. */
+  fullOut: string | null;
+}
+
+export interface VeRange {
+  from: string;
+  to: string;
+  fromTime: string;
+  toTime: string;
+  bitfield: number | null;
 }
 export interface Operator {
   key: string;
@@ -40,7 +63,8 @@ interface Cache {
   directions: Map<string, string>;
   catByNo: Map<number, string>;
   /** Journeys with more than one *A VE line (operating days vary per section). */
-  multiVe: Map<number, { from: number | null; to: number | null; bitfield: number | null }[]>;
+  multiVe: Map<number, VeRange[]>;
+  attrDefs: Map<string, AttrDef>;
 }
 
 const g = globalThis as unknown as { __hrdfCache?: Cache };
@@ -90,8 +114,21 @@ export function cache(): Cache {
       const css = `rgb(${r0} ${g0} ${b0})`;
       if (type === "F") l.fg = css;
       else l.bg = css;
+    } else if (type === "H") {
+      l.mainLine = Number(val || rest);
     }
     lines.set(id, l);
+  }
+  for (const l of lines.values()) {
+    if (l.mainLine == null) continue;
+    const main = lines.get(l.mainLine);
+    if (!main) continue;
+    l.name ??= main.name;
+    l.longName ??= main.longName;
+    l.description ??= main.description;
+    l.slnid ??= main.slnid;
+    l.fg ??= main.fg;
+    l.bg ??= main.bg;
   }
 
   const operators = new Map<string, Operator>();
@@ -160,6 +197,7 @@ export function cache(): Cache {
     directions,
     catByNo,
     multiVe: loadMultiVe(),
+    attrDefs: loadAttrDefs(),
   };
   return g.__hrdfCache;
 }
@@ -188,31 +226,114 @@ export function categoryFor(code: string | null): Category | null {
 }
 
 function loadMultiVe() {
-  const m = new Map<number, { from: number | null; to: number | null; bitfield: number | null }[]>();
+  const m = new Map<number, VeRange[]>();
   const rows = db()
     .prepare(
-      `SELECT journey, from_stop, to_stop, bitfield FROM jlines WHERE type = '*A' AND code = 'VE' AND journey IN
+      `SELECT journey, bitfield, text FROM jlines WHERE type = '*A' AND code = 'VE' AND journey IN
          (SELECT journey FROM jlines WHERE type = '*A' AND code = 'VE' GROUP BY journey HAVING COUNT(*) > 1) ORDER BY journey, idx`,
     )
-    .all() as { journey: number; from_stop: number | null; to_stop: number | null; bitfield: number | null }[];
-  for (const r of rows) m.set(r.journey, [...(m.get(r.journey) ?? []), { from: r.from_stop, to: r.to_stop, bitfield: r.bitfield || null }]);
+    .all() as { journey: number; bitfield: number | null; text: string }[];
+  for (const r of rows) {
+    const p = parseFplanLine(r.text);
+    const ve: VeRange = {
+      from: p.fields.fromStop ?? "",
+      to: p.fields.toStop ?? "",
+      fromTime: p.fields.depTime ?? "",
+      toTime: p.fields.arrTime ?? "",
+      bitfield: r.bitfield || null,
+    };
+    m.set(r.journey, [...(m.get(r.journey) ?? []), ve]);
+  }
   return m;
 }
 
+function loadAttrDefs() {
+  const defs = new Map<string, AttrDef>();
+  for (const r of rows("ATTRIBUT%")) {
+    if (r.section) continue;
+    if (r.text.startsWith("#")) {
+      const code = r.text.slice(2, 4).trim();
+      const partial = r.text.slice(5, 7).trim();
+      const full = r.text.slice(8, 10).trim();
+      const d = defs.get(code) ?? { code, relevance: 0, priority: 999, sort: 99, partialOut: null, fullOut: null };
+      d.partialOut = partial || null;
+      d.fullOut = full || null;
+      defs.set(code, d);
+      continue;
+    }
+    if (r.text.startsWith("<") || !r.text.trim()) continue;
+    const code = r.text.slice(0, 2).trim();
+    if (!code) continue;
+    const d = defs.get(code) ?? { code, relevance: 0, priority: 999, sort: 99, partialOut: null, fullOut: null };
+    d.relevance = Number(r.text.slice(3, 4)) || 0;
+    d.priority = Number(r.text.slice(5, 8)) || 0;
+    d.sort = Number(r.text.slice(9, 11)) || 0;
+    defs.set(code, d);
+  }
+  return defs;
+}
+
 /**
- * Resolves the operating-day bitfield that applies at a given stop index for
- * journeys whose *A VE differs per section. From-stops match the first
- * occurrence, to-stops the last (HRDF range rules, ignoring time disambiguation).
+ * Resolves the operating-day bitfield that applies at a given stop for
+ * journeys whose *A VE differs per section. A departure from a boundary stop
+ * uses the section that starts there; an arrival uses the one that ends there.
  */
-export function bitfieldAtStop(journey: number, stopIndex: number, stops: number[], fallback: number | null): number | null {
+export function bitfieldAtStop(
+  journey: number,
+  stopIndex: number,
+  stops: RouteStop[],
+  fallback: number | null,
+  mode: "dep" | "arr",
+): number | null {
   const ves = cache().multiVe.get(journey);
   if (!ves) return fallback;
-  for (const v of ves) {
-    const a = v.from === null ? 0 : stops.indexOf(v.from);
-    const b = v.to === null ? stops.length - 1 : stops.lastIndexOf(v.to);
-    if (a >= 0 && b >= 0 && stopIndex >= a && stopIndex <= b) return v.bitfield;
+  const resolved = ves.map((v) => {
+    const { fromIndex, toIndex } = resolveRange(stops, v.from, v.to, v.fromTime, v.toTime);
+    return { fromIndex, toIndex, bitfield: v.bitfield };
+  });
+  return veBitfieldAtStop(resolved, stopIndex, mode, fallback);
+}
+
+function stopInAttrRange(i: number, a: number, b: number, relevance: number): boolean {
+  if (i < a || i > b || a < 0 || b < 0) return false;
+  if (relevance === 0 || a === b) return true;
+  if (i === a) return (relevance & 1) !== 0;
+  if (i === b) return (relevance & 2) !== 0;
+  return (relevance & 4) !== 0;
+}
+
+/** Service attributes that apply at a stop on a given operating day (H §5.5.1). */
+export function attributesForStop(
+  lines: { code: string | null; bitfield: number | null; fields: Record<string, string> }[],
+  stops: RouteStop[],
+  stopIndex: number,
+  day: number,
+  labels: Map<string, string>,
+): { code: string; text: string }[] {
+  const defs = cache().attrDefs;
+  const last = stops.length - 1;
+  const seen = new Map<string, { code: string; text: string; priority: number; sort: number }>();
+  for (const a of lines) {
+    if (!a.code || a.code === "VE") continue;
+    if (!runsOn(a.bitfield, day)) continue;
+    const { fromIndex, toIndex } = resolveRange(stops, a.fields.fromStop ?? "", a.fields.toStop ?? "", a.fields.depTime ?? "", a.fields.arrTime ?? "");
+    const def = defs.get(a.code);
+    const rel = def?.relevance ?? 0;
+    if (!stopInAttrRange(stopIndex, fromIndex, toIndex, rel)) continue;
+    const full = fromIndex === 0 && toIndex === last;
+    const mapped = def ? (full ? def.fullOut : def.partialOut) : null;
+    if (mapped === "--") continue;
+    const code = (mapped && mapped !== a.code ? mapped : a.code).trim();
+    const entry = {
+      code,
+      text: labels.get(code) ?? labels.get(a.code) ?? code,
+      priority: def?.priority ?? 999,
+      sort: def?.sort ?? 99,
+    };
+    const prev = seen.get(code);
+    if (!prev || entry.priority < prev.priority || (entry.priority === prev.priority && entry.sort < prev.sort)) seen.set(code, entry);
   }
-  return fallback;
+  return [...seen.values()].sort((a, b) => a.priority - b.priority || a.sort - b.sort || a.code.localeCompare(b.code));
 }
 
 export type Lang = "DE" | "FR" | "IT" | "EN";

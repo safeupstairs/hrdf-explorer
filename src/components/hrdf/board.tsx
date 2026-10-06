@@ -53,7 +53,9 @@ export function Board({ entries, mode, dateIso }: { entries: BoardEntry[]; mode:
                   {op?.abbr ?? op?.short ?? j.admin}
                   <span className="ml-1.5 font-mono text-[10.5px] opacity-60">{j.admin}</span>
                 </span>
-                <span className="col-start-3 row-start-2 text-right text-[15px] font-bold md:col-start-auto md:row-start-auto">{e.track ?? <span className="text-board-muted/50">–</span>}</span>
+                <span className="col-start-3 row-start-2 truncate text-right text-[15px] font-bold md:col-start-auto md:row-start-auto" title={e.trackTitle ?? undefined}>
+                  {e.track ?? <span className="text-board-muted/50">–</span>}
+                </span>
               </Link>
             </li>
           );
