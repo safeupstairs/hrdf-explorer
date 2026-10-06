@@ -12,16 +12,30 @@ Every file in the zip has a browsable, searchable view with decoded fields and l
 
 ## Quick start
 
-Requires Node 20+ and about 4 GB of free disk space.
+Requires **Node 22 LTS** and about 4 GB of free disk space. Next 16 wants Node ≥20.9; `better-sqlite3@13` wants ≥22. Node 18 (`npm install` on an older Mac) fails with `EBADENGINE` and a native rebuild error (no `distutils`).
+
+Install Node 22, then wipe `node_modules` before installing:
 
 ```bash
+# pick one
+nvm install 22 && nvm use 22
+fnm install 22 && fnm use 22
+brew install node@22
+```
+
+```bash
+rm -rf node_modules
 npm install
 npm run data:fetch      # downloads the latest 2027 HRDF zip (~200 MB) to data/hrdf.zip
 npm run data:build      # streams it into data/hrdf.sqlite (~3.3 GB, about 3 min)
 npm run dev             # http://localhost:4317
 ```
 
+`package.json` has `"engines": { "node": ">=22" }`. `.nvmrc` / `.node-version` are set to `22`.
+
 `data/` is git-ignored. Raw HRDF data and the database are never committed.
+
+The SQLite file is ~3.3 GB, so serverless hosts (Vercel Hobby and similar) cannot run this app. There is no free public URL; use the local commands above.
 
 To load another HRDF dataset, pass a dataset slug or a direct zip URL:
 
@@ -77,3 +91,4 @@ Stack: Next.js 16 (App Router), TypeScript, Tailwind CSS v4, shadcn/ui, better-s
 - Range resolution inside a journey (`*A`/`*G`/`*L`/`*I`/`*R`/`*CI`/`*CO` from/to) follows H §7.1.1: empty = first/last stop, `#n` = 0-based route index, from-stop searched from the front, to-stop from the back, with the time and `#n` occurrence columns used to disambiguate loops.
 - **Attributes** (`*A`, other than VE) are shown on the journey timeline for the selected date, using ATTRIBUT stop relevance (boarding / alighting / intermediate / section) and `#` output rules (`--` suppresses a partial section).
 - ZEITVS is shown but not applied: times are displayed as published (local time of each stop).
+
