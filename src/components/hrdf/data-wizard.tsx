@@ -189,16 +189,6 @@ export function DataWizard({ variant }: { variant: Variant }) {
     },
   };
 
-  if (!status && !loadError) {
-    return (
-      <Panel variant={variant}>
-        <div className="rounded-md border bg-card px-4 py-8 text-center text-sm text-muted-foreground">
-          Checking for a local HRDF database…
-        </div>
-      </Panel>
-    );
-  }
-
   if (loadError && !status) {
     return (
       <Panel variant={variant}>

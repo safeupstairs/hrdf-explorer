@@ -129,7 +129,8 @@ function finishSuccess(message?: string): ImportStatus {
   const dbBytes = existsSync(DB_PATH) ? statSync(DB_PATH).size : null;
   const started = g.__hrdfImport!.status.startedAt;
   const elapsed = started ? Math.round((Date.now() - Date.parse(started)) / 1000) : null;
-  const size = dbBytes != null ? `${(dbBytes / 1e9).toFixed(2)} GB` : "SQLite";
+  const size =
+    dbBytes == null ? "SQLite" : dbBytes >= 1e9 ? `${(dbBytes / 1e9).toFixed(2)} GB` : dbBytes >= 1e6 ? `${(dbBytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(dbBytes / 1e3))} KB`;
   return patch({
     state: "success",
     pct: 100,
@@ -361,8 +362,8 @@ export async function saveUpload(
     const whole = g.__hrdfImport!.status.totalBytes || total || size;
     patch({ pct: whole ? (size / whole) * 12 : 1, bytes: size, totalBytes: whole });
     if (!final) return snapshot();
+    await assertReadableZip(tmp);
     renameSync(tmp, ZIP_PATH);
-    await assertReadableZip(ZIP_PATH);
     patch({ zipReady: true, pct: 12, bytes: size, message: "Upload complete. Starting import…" });
     startBuildProcess();
     return snapshot();
