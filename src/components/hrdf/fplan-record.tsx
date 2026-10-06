@@ -1,4 +1,5 @@
 import type { ParsedFplanLine } from "@/lib/hrdf/fplan";
+import { formatHrdfTimeField } from "@/lib/hrdf/fplan";
 import type { Field } from "@/lib/hrdf/decoders";
 import { DecodedInline } from "./decoded-fields";
 
@@ -21,6 +22,7 @@ const LABELS: Record<string, string> = {
   direction: "Direction",
   directionCode: "Dir. code",
   minutes: "Minutes",
+  role: "Meaning",
   borderPoint: "Border point",
   lastStopBefore: "Last stop before",
   firstStopAfter: "First stop after",
@@ -38,7 +40,15 @@ export function fplanFields(p: ParsedFplanLine, fromName?: string | null, toName
     const label = k === "minutes" && p.type === "*CO" ? "Buffer minutes (not shown to passengers)" : k === "minutes" && p.type === "*CI" ? "Check-in minutes" : LABELS[k] ?? k;
     if (k === "fromStop" || k === "toStop" || k === "stop" || k === "lastStopBefore" || k === "firstStopAfter" || k === "borderPoint") {
       const nm = k === "fromStop" ? fromName : k === "toStop" ? toName : null;
-      out.push({ label, value: nm ? `${v} ${nm}` : v, link: { kind: "station", id: String(Number(v)) }, mono: true });
+      const isIndex = v.startsWith("#");
+      out.push({
+        label: isIndex ? `${label} (route index)` : label,
+        value: isIndex ? v : nm ? `${v} ${nm}` : v,
+        link: isIndex ? undefined : { kind: "station", id: String(Number(v)) },
+        mono: true,
+      });
+    } else if (k === "depTime" || k === "arrTime") {
+      out.push({ label, value: formatHrdfTimeField(v), mono: true });
     } else if (k === "bitfield") {
       out.push({ label, value: v, link: Number(v) ? { kind: "bitfield", id: String(Number(v)) } : undefined, mono: true });
     } else if (k === "infotext") {

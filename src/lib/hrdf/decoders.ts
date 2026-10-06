@@ -167,7 +167,19 @@ const decoders: Record<string, DecoderFn> = {
     } else if (type === "I") {
       fields.push(txt("Record", "Info text"), txt("Code", sub, true), info("Infotext", rest[0] ?? ""));
     } else if (type === "B") {
-      fields.push(txt("Record", "Restriction"), txt("Restriction", sub, true), txt("Name", note));
+      const sel = Number(c(body, 11, 12));
+      const routing = c(body, 14, 15);
+      const flags: string[] = [];
+      if (sel & 1) flags.push("no start");
+      if (sel & 2) flags.push("no destination");
+      if (sel & 4) flags.push("no via");
+      if (sel & 8) flags.push("no departure board");
+      fields.push(
+        txt("Record", "Restriction"),
+        txt("Selection restriction", `${c(body, 11, 12)}${flags.length ? ` (${flags.join(", ")})` : sel === 0 ? " (none)" : ""}`, true),
+        txt("Routing restriction", routing || "—", true),
+        txt("Name", note),
+      );
     } else {
       fields.push(txt("Type", type ?? "", true), txt("Value", [sub, ...rest].join(" "), true), txt("Comment", note));
     }
@@ -261,7 +273,7 @@ const decoders: Record<string, DecoderFn> = {
     const type = c(line, 9, 9);
     const rest = line.slice(10).trim();
     const lineLink: Field = { label: "Line", value: id, link: { kind: "line", id: String(Number(id)) }, mono: true };
-    const labels: Record<string, string> = { K: "Line SLNID", N: "Short name", L: "Line name", R: "Region / route", D: "Description", I: "Info text", F: "Text colour", B: "Background colour", H: "Hex colour" };
+    const labels: Record<string, string> = { K: "Line SLNID", N: "Short name", L: "Line name", R: "Region / route", D: "Description", I: "Info text", F: "Text colour", B: "Background colour", H: "Main line (Hauptlinie)" };
     if (type === "F" || type === "B") {
       const [r, g, b] = rest.split(/\s+/).map(Number);
       return { kind: `line-${type}`, fields: [lineLink, txt("Record", labels[type]), { label: "RGB", value: rest, color: `rgb(${r}, ${g}, ${b})`, mono: true }] };
@@ -269,6 +281,12 @@ const decoders: Record<string, DecoderFn> = {
     if (type === "I") {
       const [code, nr] = rest.split(/\s+/);
       return { kind: "line-I", fields: [lineLink, txt("Record", labels.I), txt("Code", code, true), info("Infotext", nr ?? "")] };
+    }
+    if (type === "H") {
+      return {
+        kind: "line-H",
+        fields: [lineLink, txt("Record", labels.H), { label: "Main line", value: rest, link: { kind: "line", id: String(Number(rest)) }, mono: true }],
+      };
     }
     if (["N", "L", "R", "D"].includes(type)) {
       const [, ...v] = rest.split(" ");

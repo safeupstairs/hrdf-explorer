@@ -23,10 +23,18 @@ export interface ParsedFplanLine {
   code: string | null;
   fromStop: number | null;
   toStop: number | null;
+  fromIndex: number | null;
+  toIndex: number | null;
   bitfield: number | null;
   ref: string | null;
   fields: Record<string, string>;
   comment: string | null;
+}
+
+export interface RouteStop {
+  stop: number;
+  arr: number | null;
+  dep: number | null;
 }
 
 const col = (l: string, from: number, to: number) => l.slice(from - 1, to).trim();
@@ -35,6 +43,16 @@ export function numOrNull(s: string): number | null {
   if (!s) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Stop field: empty, a 7-digit stop number, or `#n` 0-based route index (H §7.1.1). */
+export function parseStopField(s: string): { stop: number | null; index: number | null } {
+  if (!s) return { stop: null, index: null };
+  if (s.startsWith("#")) {
+    const index = Number(s.slice(1));
+    return { stop: null, index: Number.isFinite(index) ? index : null };
+  }
+  return { stop: numOrNull(s), index: null };
 }
 
 /** HRDF time "HHHMM" (optionally prefixed with "-") → minutes after midnight of the operating day. */
@@ -76,10 +94,17 @@ export function parseFplanLine(line: string): ParsedFplanLine {
     code: null,
     fromStop: null,
     toStop: null,
+    fromIndex: null,
+    toIndex: null,
     bitfield: null,
     ref: null,
     fields: {},
     comment,
+  };
+  const range = (from: string, to: string) => {
+    const a = parseStopField(from);
+    const b = parseStopField(to);
+    return { fromStop: a.stop, toStop: b.stop, fromIndex: a.index, toIndex: b.index };
   };
   switch (type) {
     case "*Z": {
@@ -100,7 +125,7 @@ export function parseFplanLine(line: string): ParsedFplanLine {
         depTime: col(l, 24, 29),
         arrTime: col(l, 31, 36),
       };
-      return { ...base, code: f.category, fromStop: numOrNull(f.fromStop), toStop: numOrNull(f.toStop), fields: f };
+      return { ...base, code: f.category, ...range(f.fromStop, f.toStop), fields: f };
     }
     case "*A": {
       const f = {
@@ -114,8 +139,7 @@ export function parseFplanLine(line: string): ParsedFplanLine {
       return {
         ...base,
         code: f.attribute,
-        fromStop: numOrNull(f.fromStop),
-        toStop: numOrNull(f.toStop),
+        ...range(f.fromStop, f.toStop),
         bitfield: numOrNull(f.bitfield),
         fields: f,
       };
@@ -133,8 +157,7 @@ export function parseFplanLine(line: string): ParsedFplanLine {
       return {
         ...base,
         code: f.infoCode,
-        fromStop: numOrNull(f.fromStop),
-        toStop: numOrNull(f.toStop),
+        ...range(f.fromStop, f.toStop),
         bitfield: numOrNull(f.bitfield),
         ref: f.infotext || null,
         fields: f,
@@ -152,8 +175,7 @@ export function parseFplanLine(line: string): ParsedFplanLine {
         ...base,
         code: f.line.startsWith("#") ? "#" : "literal",
         ref: f.line,
-        fromStop: numOrNull(f.fromStop),
-        toStop: numOrNull(f.toStop),
+        ...range(f.fromStop, f.toStop),
         fields: f,
       };
     }
@@ -170,8 +192,7 @@ export function parseFplanLine(line: string): ParsedFplanLine {
         ...base,
         code: f.direction,
         ref: f.directionCode || null,
-        fromStop: numOrNull(f.fromStop),
-        toStop: numOrNull(f.toStop),
+        ...range(f.fromStop, f.toStop),
         fields: f,
       };
     }
@@ -181,8 +202,11 @@ export function parseFplanLine(line: string): ParsedFplanLine {
         minutes: col(l, 5, 8),
         fromStop: col(l, 10, 16),
         toStop: col(l, 18, 24),
+        depTime: col(l, 26, 31),
+        arrTime: col(l, 33, 38),
+        role: type === "*CO" ? "Line buffer (not shown to passengers)" : "Check-in time",
       };
-      return { ...base, code: type.slice(1), fromStop: numOrNull(f.fromStop), toStop: numOrNull(f.toStop), fields: f };
+      return { ...base, code: type.slice(1), ...range(f.fromStop, f.toStop), fields: f };
     }
     case "*GR": {
       const f = {
@@ -206,13 +230,88 @@ export function parseFplanLine(line: string): ParsedFplanLine {
         name: col(l, 9, 29),
         arrTime: arr,
         depTime: dep,
-        journeyNumber: col(l, 44, 48),
-        administration: col(l, 50, 55),
-        flag: col(l, 57, 57),
+        journeyNumber: col(l, 44, 49),
+        administration: col(l, 51, 56),
+        flag: col(l, 58, 58),
       };
       return { ...base, fromStop: numOrNull(f.stop), fields: f };
     }
     default:
       return { ...base, code: l.split(/\s+/)[0] ?? null, fields: { content: l } };
   }
+}
+
+/** Format a raw FPLAN time/occurrence field (`00706`, `-01933`, `#2`) for display. */
+export function formatHrdfTimeField(raw: string): string {
+  const s = raw.trim();
+  if (!s) return "";
+  if (s.startsWith("#")) return `occurrence ${s.slice(1)}`;
+  const { minutes, negative } = parseHrdfTime(s);
+  if (minutes === null) return s;
+  const h = Math.floor(minutes / 60) % 24;
+  const m = minutes % 60;
+  const day = Math.floor(minutes / 1440);
+  return `${negative ? "−" : ""}${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}${day ? ` +${day}` : ""}`;
+}
+
+function resolveEnd(stops: RouteStop[], field: string, timeField: string, end: "from" | "to"): number {
+  if (!stops.length) return -1;
+  if (!field) return end === "from" ? 0 : stops.length - 1;
+  if (field.startsWith("#")) {
+    const idx = Number(field.slice(1));
+    if (!Number.isFinite(idx)) return -1;
+    return Math.max(0, Math.min(idx, stops.length - 1));
+  }
+  const stop = Number(field);
+  if (!Number.isFinite(stop)) return -1;
+  const candidates: number[] = [];
+  for (let i = 0; i < stops.length; i++) if (stops[i].stop === stop) candidates.push(i);
+  if (!candidates.length) return -1;
+  if (timeField.startsWith("#")) {
+    const occ = Number(timeField.slice(1));
+    return candidates[occ] ?? -1;
+  }
+  if (timeField) {
+    const t = parseHrdfTime(timeField).minutes;
+    if (t !== null) {
+      const match = candidates.find((i) => (end === "from" ? stops[i].dep : stops[i].arr) === t);
+      if (match !== undefined) return match;
+    }
+  }
+  return end === "from" ? candidates[0] : candidates[candidates.length - 1];
+}
+
+/**
+ * H §7.1.1 range: empty = first/last stop, `#n` = 0-based route index,
+ * from-stop searched from the front, to-stop from the back, times / `#n`
+ * occurrence columns disambiguate loops.
+ */
+export function resolveRange(
+  stops: RouteStop[],
+  fromField: string,
+  toField: string,
+  fromTime = "",
+  toTime = "",
+): { fromIndex: number; toIndex: number } {
+  return {
+    fromIndex: resolveEnd(stops, fromField, fromTime, "from"),
+    toIndex: resolveEnd(stops, toField, toTime, "to"),
+  };
+}
+
+/**
+ * Operating-day bitfield at a stop for multi-section *A VE. Both VE ranges
+ * include the boundary stop; a departure belongs to the section that starts
+ * there, an arrival to the section that ends there (H §7.1.3).
+ */
+export function veBitfieldAtStop(
+  ves: { fromIndex: number; toIndex: number; bitfield: number | null }[],
+  stopIndex: number,
+  mode: "dep" | "arr",
+  fallback: number | null,
+): number | null {
+  const preferred = mode === "dep" ? ves.find((v) => v.fromIndex === stopIndex) : ves.find((v) => v.toIndex === stopIndex);
+  if (preferred) return preferred.bitfield;
+  const cover = ves.find((v) => stopIndex >= v.fromIndex && stopIndex <= v.toIndex);
+  return cover ? cover.bitfield : fallback;
 }

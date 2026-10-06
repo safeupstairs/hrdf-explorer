@@ -4,7 +4,7 @@ import type { Metadata } from "next";
 import { CalendarCheck2, CalendarX2, Repeat } from "lucide-react";
 import { hasDb } from "@/lib/db";
 import { getJourney } from "@/lib/hrdf/queries";
-import { cache, runsOn } from "@/lib/hrdf/lookups";
+import { attributesForStop, cache, runsOn, texts } from "@/lib/hrdf/lookups";
 import { bitfieldDays, dayIndex, defaultDate, formatDate, fromIsoDate, minutesToTime, toIsoDate } from "@/lib/hrdf/calendar";
 import { qs } from "@/lib/links";
 import { CategoryBadge } from "@/components/hrdf/category-badge";
@@ -57,7 +57,10 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
   const date = fromIsoDate(String(sp.date ?? "")) ?? defaultDate(period);
   const iso = toIsoDate(date);
   const day = dayIndex(period.start, date);
-  const runs = runsOn(j.bitfield, day);
+  const sectionVe = data.records.filter((r) => r.type === "*A" && r.code === "VE");
+  const sectionFlags = sectionVe.length ? sectionVe.map((v) => runsOn(v.bitfield, day)) : [runsOn(j.bitfield, day)];
+  const anyRun = sectionFlags.some(Boolean);
+  const allRun = sectionFlags.every(Boolean);
   const bf = j.bitfield ? c.bitfields.get(j.bitfield) : null;
   const days = bf ? bf.days : bitfieldDays("F".repeat(96), period.days);
   const cycle = Math.min(Math.max(Number(sp.cycle ?? 0) || 0, 0), j.takt_n ?? 0);
@@ -66,10 +69,14 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
   const link = (o: Record<string, string | number | undefined>) => `/journeys/${id}${qs({ date: iso, cycle: cycle || undefined, tab, ...o })}`;
 
   const trackAt = (stop: number, time: number | null) => {
-    const hit = tracks.find((t) => t.stop === stop && (t.time === null || t.time === time || (time !== null && t.time === time % 1440)) && runsOn(t.bitfield, day));
-    return hit?.label || null;
+    const rows = tracks.filter((t) => t.stop === stop && runsOn(t.bitfield, day));
+    const timed = time !== null ? rows.find((t) => t.time !== null && (t.time === time || t.time === time % 1440)) : undefined;
+    return timed ?? rows.find((t) => t.time === null) ?? null;
   };
-  const sectionVe = records.filter((r) => r.type === "*A" && r.code === "VE");
+  const attrLines = records.filter((r) => r.type === "*A").map((r) => ({ code: r.code, bitfield: r.bitfield, fields: r.parsed.fields }));
+  const labels = texts(lang).attributes;
+  const throughToday = data.through.filter((t) => runsOn(Number(t.text.slice(36, 42).trim()) || null, day));
+  const transfersToday = data.transfers.filter((t) => runsOn(Number(t.text.slice(41, 47).trim()) || null, day));
 
   return (
     <div>
@@ -170,11 +177,14 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
         ) : null}
       </PageHeader>
 
-      <div className={cn("mt-6 flex flex-wrap items-center gap-3 rounded-md border-l-4 px-4 py-3", runs ? "border-run bg-run-soft" : "border-muted-foreground bg-muted")}>
-        {runs ? <CalendarCheck2 className="size-5 text-run" /> : <CalendarX2 className="size-5 text-muted-foreground" />}
+      <div className={cn("mt-6 flex flex-wrap items-center gap-3 rounded-md border-l-4 px-4 py-3", anyRun ? "border-run bg-run-soft" : "border-muted-foreground bg-muted")}>
+        {anyRun ? <CalendarCheck2 className="size-5 text-run" /> : <CalendarX2 className="size-5 text-muted-foreground" />}
         <div className="text-[15px]">
-          <span className="font-bold">{runs ? "Runs" : "Does not run"}</span> on {formatDate(date, { weekday: "long", month: "long" })}
+          <span className="font-bold">{allRun ? "Runs" : anyRun ? "Runs on part of the route" : "Does not run"}</span> on {formatDate(date, { weekday: "long", month: "long" })}
           {j.bitfield ? <span className="text-muted-foreground"> · bit {day + 2} of bitfield {j.bitfield}</span> : null}
+          {sectionVe.length > 1 && anyRun && !allRun ? (
+            <span className="block text-sm font-normal text-muted-foreground">Some *A VE sections run on this date; see the Operating days tab.</span>
+          ) : null}
         </div>
         <form className="ml-auto flex items-center gap-2">
           <input type="hidden" name="tab" value={tab} />
@@ -190,7 +200,7 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
           ["days", "Operating days"],
           ["records", `Records (${records.length})`],
           ["raw", "Raw HRDF"],
-          ["related", `Related (${variants.length - 1 + data.through.length + data.transfers.length})`],
+          ["related", `Related (${variants.length - 1 + throughToday.length + transfersToday.length})`],
         ].map(([k, label]) => (
           <Link key={k} href={link({ tab: k })} className={cn("-mb-px border-b-[3px] px-3 py-2 text-sm font-semibold whitespace-nowrap", tab === k ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
             {label}
@@ -207,7 +217,16 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
               const pseudo = s.stop < 1000000;
               const arr = s.arr !== null ? s.arr + shift : null;
               const dep = s.dep !== null ? s.dep + shift : null;
-              const track = trackAt(s.stop, s.dep ?? s.arr);
+              const arrTrack = s.arr !== null ? trackAt(s.stop, s.arr) : null;
+              const depTrack = s.dep !== null ? trackAt(s.stop, s.dep) : null;
+              const stopAttrs = attributesForStop(attrLines, stops, i, day, labels);
+              const trackBits = [
+                arrTrack && depTrack && arrTrack.ref === depTrack.ref
+                  ? { label: arrTrack.label, title: arrTrack.title, prefix: "" }
+                  : null,
+                arrTrack && (!depTrack || arrTrack.ref !== depTrack.ref) ? { label: arrTrack.label, title: arrTrack.title, prefix: "arr " } : null,
+                depTrack && (!arrTrack || arrTrack.ref !== depTrack.ref) ? { label: depTrack.label, title: depTrack.title, prefix: "dep " } : null,
+              ].filter((x): x is { label: string | null; title: string | null; prefix: string } => x !== null && !!x.label);
               return (
                 <li key={s.seq} className="grid grid-cols-[52px_52px_28px_minmax(0,1fr)_auto] items-center gap-x-2 sm:grid-cols-[64px_64px_36px_minmax(0,1fr)_120px_60px]">
                   <span className="py-2 text-right font-mono text-[13px]"><T min={arr} neg={(s.flags & 1) === 1} /></span>
@@ -228,9 +247,24 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
                     <span className="ml-2 font-mono text-[11px] text-muted-foreground">{pad7(s.stop)}</span>
                     {pseudo ? <span className="ml-2 text-[11px] text-muted-foreground italic">fictional via point</span> : null}
                     {stopUsage(s) ? <span className="ml-2 text-[11px] text-muted-foreground sm:hidden">{stopUsage(s)}</span> : null}
+                    {stopAttrs.length ? (
+                      <span className="mt-0.5 flex flex-wrap gap-1">
+                        {stopAttrs.map((a) => (
+                          <Link key={a.code} href={`/ref/attribute/${encodeURIComponent(a.code)}`} title={a.text} className="rounded-sm border bg-card px-1 py-px font-mono text-[10px] text-muted-foreground hover:border-foreground hover:text-foreground">
+                            {a.code} {a.text}
+                          </Link>
+                        ))}
+                      </span>
+                    ) : null}
                   </span>
                   <span className="hidden font-mono text-[11px] text-muted-foreground sm:block">{stopUsage(s)}</span>
-                  <span className="text-right text-sm font-bold whitespace-nowrap">{track ? <span title="Track (GLEISE)">Pl. {track}</span> : null}</span>
+                  <span className="text-right text-sm font-bold whitespace-nowrap">
+                    {trackBits.map((t) => (
+                      <span key={t.prefix + (t.label ?? "")} className="ml-1" title={t.title ?? "Track (GLEISE)"}>
+                        {t.prefix}Pl. {t.label}
+                      </span>
+                    ))}
+                  </span>
                 </li>
               );
             })}
@@ -328,10 +362,10 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
               ))}
             </div>
           </Section>
-          {data.through.length ? (
-            <Section title="Through-services" aside="DURCHBI">
+          {throughToday.length ? (
+            <Section title="Through-services" aside="DURCHBI · this date">
               <div className="divide-y rounded-md border bg-card">
-                {data.through.map((t) => (
+                {throughToday.map((t) => (
                   <div key={t.n} className="px-3 py-2">
                     <DecodedInline fields={t.decoded.fields} />
                   </div>
@@ -339,10 +373,10 @@ export default async function JourneyPage({ params, searchParams }: PageProps<"/
               </div>
             </Section>
           ) : null}
-          {data.transfers.length ? (
-            <Section title="Guaranteed / timed transfers" aside="UMSTEIGZ">
+          {transfersToday.length ? (
+            <Section title="Guaranteed / timed transfers" aside="UMSTEIGZ · this date">
               <div className="divide-y rounded-md border bg-card">
-                {data.transfers.map((t) => (
+                {transfersToday.map((t) => (
                   <div key={t.n} className="px-3 py-2">
                     <DecodedInline fields={t.decoded.fields} />
                   </div>

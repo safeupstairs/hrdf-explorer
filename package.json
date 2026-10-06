@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start -p 4317",
     "lint": "eslint",
+    "test": "tsx --test src/lib/hrdf/fplan.test.ts",
     "data:fetch": "tsx scripts/fetch-hrdf.ts",
     "data:build": "tsx scripts/build-db.ts"
   },

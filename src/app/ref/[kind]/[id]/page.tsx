@@ -147,6 +147,15 @@ export default async function RefPage({ params }: PageProps<"/ref/[kind]/[id]">)
       <div>
         <PageHeader eyebrow={`${TITLES.line} · LINIE #${id.padStart(7, "0")}`} title={<span className="flex items-center gap-3">{li?.bg ? <span className="rounded px-3 py-1" style={{ background: li.bg, color: li.fg ?? "#fff" }}>{li.name}</span> : li?.name ?? id}{li?.description ? <span className="text-muted-foreground">{li.description}</span> : null}</span>}>
           {li?.slnid}
+          {li?.mainLine != null ? (
+            <div className="mt-2 text-sm">
+              Partial line of{" "}
+              <Link href={`/ref/line/${li.mainLine}`} className="link-u font-semibold">
+                LINIE #{String(li.mainLine).padStart(7, "0")}
+              </Link>
+              {lineInfo(li.mainLine)?.name ? ` (${lineInfo(li.mainLine)?.name})` : null} · missing names and colours are inherited; attributes and infotexts are not.
+            </div>
+          ) : null}
         </PageHeader>
         <Section title="LINIE records">
           <RecordList file="LINIE" rows={rows} />

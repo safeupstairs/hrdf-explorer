@@ -1,6 +1,7 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
-export default function Loading() {
+/** Shared route-level loading skeleton. Kept off the root layout so notFound/redirect keep their HTTP status. */
+export function PageLoading() {
   return (
     <div aria-busy="true" aria-label="Loading">
       <Skeleton className="h-3 w-40" />

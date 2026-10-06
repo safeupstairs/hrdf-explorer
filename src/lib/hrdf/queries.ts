@@ -2,7 +2,7 @@ import "server-only";
 import { inflateRawSync } from "node:zlib";
 import { db } from "@/lib/db";
 import { bitfieldAtStop, cache, categoryIn, lineInfo, runsOn, texts, type Lang } from "./lookups";
-import { parseFplanLine } from "./fplan";
+import { parseFplanLine, type RouteStop } from "./fplan";
 import { decodeLine } from "./decoders";
 
 export interface StationRow {
@@ -119,45 +119,86 @@ export function stationMentions(id: number) {
 }
 
 export function metaGroups(id: number) {
-  const d = db();
-  const rows = d.prepare("SELECT text FROM lines WHERE file = 'METABHF' AND text LIKE ?").all(`%${String(id).padStart(7, "0")}%`) as { text: string }[];
-  const groups: { meta: number; members: number[] }[] = [];
-  const transfers: { from: number; to: number; minutes: number }[] = [];
+  const parsed = parseMetabhf();
+  const groups = parsed.groups.filter((g) => g.meta === id || g.members.includes(id));
+  const transfers = parsed.transfers.filter((t) => t.from === id || t.to === id);
+  return { groups, transfers };
+}
+
+interface MetabhfCache {
+  groups: { meta: number; members: number[] }[];
+  transfers: { from: number; to: number; minutes: number; attributes: string[] }[];
+}
+
+function parseMetabhf(): MetabhfCache {
+  const g = globalThis as unknown as { __hrdfMetabhf?: MetabhfCache };
+  if (g.__hrdfMetabhf) return g.__hrdfMetabhf;
+  const rows = db().prepare("SELECT n, text FROM lines WHERE file = 'METABHF' ORDER BY n").all() as { n: number; text: string }[];
+  const groups: MetabhfCache["groups"] = [];
+  const transfers: MetabhfCache["transfers"] = [];
+  let current: MetabhfCache["transfers"][number] | null = null;
   for (const r of rows) {
+    if (r.text.startsWith("*A")) {
+      const code = r.text.slice(3).trim();
+      if (current && code) current.attributes.push(code);
+      continue;
+    }
     const colon = r.text.indexOf(":");
     if (colon > 0 && colon <= 8) {
+      current = null;
       groups.push({ meta: Number(r.text.slice(0, colon)), members: r.text.slice(colon + 1).trim().split(/\s+/).map(Number) });
     } else if (/^\d{7} \d{7}/.test(r.text)) {
-      transfers.push({ from: Number(r.text.slice(0, 7)), to: Number(r.text.slice(8, 15)), minutes: Number(r.text.slice(16, 19)) });
+      current = {
+        from: Number(r.text.slice(0, 7)),
+        to: Number(r.text.slice(8, 15)),
+        minutes: Number(r.text.slice(16, 19)),
+        attributes: [],
+      };
+      transfers.push(current);
+    } else {
+      current = null;
     }
   }
-  return { groups, transfers };
+  g.__hrdfMetabhf = { groups, transfers };
+  return g.__hrdfMetabhf;
 }
 
 export function trackDefs(stop: number) {
   return db().prepare("SELECT file, ref, kind, value FROM gleis_def WHERE stop = ? ORDER BY ref, file").all(stop) as { file: string; ref: string; kind: string; value: string }[];
 }
 
-/** Track name (G + optional T + A); GLEISE `G ''` has no name, so fall back to the quay SLOID suffix. */
-function trackLabel(stop: number, ref: string): string | null {
+export interface TrackInfo {
+  ref: string;
+  label: string | null;
+  title: string | null;
+}
+
+/** Track name (G + optional T + A); GLEISE `G ''` has no name, so fall back to the quay SLOID. */
+function trackLabel(stop: number, ref: string): { label: string | null; title: string | null } {
   const rows = db().prepare("SELECT kind, value FROM gleis_def WHERE stop = ? AND ref = ? AND kind IN ('G', 'A', 'T', 'g')").all(stop, ref) as { kind: string; value: string }[];
   const val = (k: string) => rows.find((r) => r.kind === k)?.value.replace(/^'|'$/g, "") ?? "";
   const name = `${val("G")}${val("T")}${val("A")}`;
-  if (name) return name;
+  if (name) return { label: name, title: null };
   const sloid = val("g").split(/\s+/).pop();
-  return sloid ? `…${sloid.split(":").slice(-2).join(":")}` : null;
+  if (!sloid) return { label: null, title: null };
+  const quay = sloid.split(":").slice(-2).join(":");
+  return { label: `no track name (quay ${quay})`, title: sloid };
 }
 
-/** Track ref for a journey at a stop on a given day (GLEISE assignments are keyed by journey number + admin + optional time / bitfield). */
-export function trackFor(stop: number, nr: number, admin: string, time: number | null, day: number): { ref: string; label: string | null } | null {
+/** Track ref for a journey at a stop on a given day. Prefer an exact-time GLEISE row over an untimed one. */
+export function trackFor(stop: number, nr: number, admin: string, time: number | null, day: number): TrackInfo | null {
   const rows = db()
     .prepare("SELECT ref, time, bitfield FROM gleis WHERE nr = ? AND admin = ? AND stop = ?")
     .all(nr, admin, stop) as { ref: string; time: number | null; bitfield: number | null }[];
-  const hit =
-    rows.find((r) => (r.time === null || r.time === time || (time !== null && r.time === time % 1440)) && runsOn(r.bitfield, day)) ??
-    null;
+  const ok = (r: { bitfield: number | null }) => runsOn(r.bitfield, day);
+  const timed =
+    time !== null
+      ? rows.find((r) => r.time !== null && (r.time === time || r.time === time % 1440) && ok(r))
+      : undefined;
+  const hit = timed ?? rows.find((r) => r.time === null && ok(r)) ?? null;
   if (!hit) return null;
-  return { ref: hit.ref, label: trackLabel(stop, hit.ref) };
+  const { label, title } = trackLabel(stop, hit.ref);
+  return { ref: hit.ref, label, title };
 }
 
 export interface BoardEntry {
@@ -171,6 +212,7 @@ export interface BoardEntry {
   terminus: string;
   origin: string;
   track: string | null;
+  trackTitle: string | null;
 }
 
 export function board(stop: number, day: number, from: number, to: number, mode: "dep" | "arr", limit = 120): BoardEntry[] {
@@ -186,17 +228,17 @@ export function board(stop: number, day: number, from: number, to: number, mode:
      WHERE j.takt_n > 0 AND s.${col} <= ? AND s.${col} + j.takt_n * j.takt_min >= ?`,
   );
   type R = JourneyRow & { seq: number; t: number; flags: number };
-  const out: Omit<BoardEntry, "terminus" | "origin" | "track">[] = [];
+  const out: Omit<BoardEntry, "terminus" | "origin" | "track" | "trackTitle">[] = [];
   const c = cache();
-  const stopSeqCache = new Map<number, number[]>();
+  const stopSeqCache = new Map<number, RouteStop[]>();
   const effectiveBitfield = (r: R) => {
     if (!c.multiVe.has(r.id)) return r.bitfield;
     let seq = stopSeqCache.get(r.id);
     if (!seq) {
-      seq = (d.prepare("SELECT stop FROM stops WHERE journey = ? ORDER BY seq").all(r.id) as { stop: number }[]).map((x) => x.stop);
+      seq = d.prepare("SELECT stop, arr, dep FROM stops WHERE journey = ? ORDER BY seq").all(r.id) as RouteStop[];
       stopSeqCache.set(r.id, seq);
     }
-    return bitfieldAtStop(r.id, r.seq - 1, seq, r.bitfield);
+    return bitfieldAtStop(r.id, r.seq - 1, seq, r.bitfield, mode);
   };
   for (const shift of [0, -1]) {
     const a = from - shift * 1440;
@@ -219,12 +261,16 @@ export function board(stop: number, day: number, from: number, to: number, mode:
   out.sort((x, y) => x.time - y.time || x.journey.nr - y.journey.nr);
   const slice = out.slice(0, limit);
   const names = stationNames(slice.flatMap((e) => [e.journey.to_stop ?? 0, e.journey.from_stop ?? 0]));
-  return slice.map((e) => ({
-    ...e,
-    terminus: names.get(e.journey.to_stop ?? 0) ?? String(e.journey.to_stop),
-    origin: names.get(e.journey.from_stop ?? 0) ?? String(e.journey.from_stop),
-    track: trackFor(stop, e.journey.nr, e.journey.admin, e.time - e.serviceDayShift * 1440, day + e.serviceDayShift)?.label ?? null,
-  }));
+  return slice.map((e) => {
+    const tr = trackFor(stop, e.journey.nr, e.journey.admin, e.time - e.serviceDayShift * 1440, day + e.serviceDayShift);
+    return {
+      ...e,
+      terminus: names.get(e.journey.to_stop ?? 0) ?? String(e.journey.to_stop),
+      origin: names.get(e.journey.from_stop ?? 0) ?? String(e.journey.from_stop),
+      track: tr?.label ?? null,
+      trackTitle: tr?.title ?? null,
+    };
+  });
 }
 
 export interface JourneyFilter {
@@ -336,7 +382,7 @@ export function getJourney(id: number, lang: Lang = "EN") {
     .prepare(`SELECT ${JOURNEY_COLS} FROM journeys j WHERE j.nr = ? AND j.admin = ? ORDER BY j.dep LIMIT 60`)
     .all(j.nr, j.admin) as JourneyRow[];
   const tracks = d.prepare("SELECT stop, ref, time, bitfield FROM gleis WHERE nr = ? AND admin = ?").all(j.nr, j.admin) as { stop: number; ref: string; time: number | null; bitfield: number | null }[];
-  const trackLabels = new Map<string, string | null>();
+  const trackLabels = new Map<string, { label: string | null; title: string | null }>();
   for (const t of tracks) {
     const k = `${t.stop}|${t.ref}`;
     if (!trackLabels.has(k)) trackLabels.set(k, trackLabel(t.stop, t.ref));
@@ -353,7 +399,10 @@ export function getJourney(id: number, lang: Lang = "EN") {
     stops: stops.map((s) => ({ ...s, name: names.get(s.stop) ?? String(s.stop), lon: coords.get(s.stop)?.lon ?? null, lat: coords.get(s.stop)?.lat ?? null })),
     records,
     variants,
-    tracks: tracks.map((t) => ({ ...t, label: trackLabels.get(`${t.stop}|${t.ref}`) ?? null })),
+    tracks: tracks.map((t) => {
+      const info = trackLabels.get(`${t.stop}|${t.ref}`);
+      return { ...t, label: info?.label ?? null, title: info?.title ?? null };
+    }),
     operator: t.operatorsByAdmin.get(j.admin) ?? null,
     category: categoryIn(j.category, lang),
     lineInfo: lineInfo(j.line_ref),
@@ -481,6 +530,10 @@ export function browseGleisDefs(file: string, stop: string, offset: number, limi
   return db().prepare(`SELECT n, stop, ref, kind, value FROM gleis_def WHERE ${w} ORDER BY n LIMIT ? OFFSET ?`).all(...args, limit, offset) as {
     n: number; stop: number; ref: string; kind: string; value: string;
   }[];
+}
+
+export function journeyExists(id: number): boolean {
+  return !!(db().prepare("SELECT 1 AS ok FROM journeys WHERE id = ?").get(id) as { ok: number } | undefined);
 }
 
 export function journeyIdFor(nr: number, admin: string): number | null {
