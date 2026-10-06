@@ -21,8 +21,10 @@ export function db(): Database.Database {
   if (g.__hrdfDb) return g.__hrdfDb;
   if (!existsSync(DB_PATH)) throw new NoDataError();
   const d = new Database(DB_PATH, { readonly: true, fileMustExist: true });
-  d.pragma("cache_size = -200000");
-  d.pragma("mmap_size = 3000000000");
+  const cache = Number(process.env.HRDF_CACHE_SIZE ?? -200000);
+  const mmap = Number(process.env.HRDF_MMAP_SIZE ?? 3_000_000_000);
+  d.pragma(`cache_size = ${Number.isFinite(cache) ? cache : -200000}`);
+  d.pragma(`mmap_size = ${Number.isFinite(mmap) ? mmap : 3_000_000_000}`);
   g.__hrdfDb = d;
   return d;
 }

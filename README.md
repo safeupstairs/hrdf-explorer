@@ -12,14 +12,26 @@ Every file in the zip has a browsable, searchable view with decoded fields and l
 
 ## Quick start
 
-Requires Node 20+ and about 4 GB of free disk space.
+Requires **Node 22 LTS** and about 4 GB of free disk space. Next 16 wants Node ≥20.9; `better-sqlite3@13` wants ≥22. Node 18 (`npm install` on an older Mac) fails with `EBADENGINE` and a native rebuild error (no `distutils`).
+
+Install Node 22, then wipe `node_modules` before installing:
 
 ```bash
+# pick one
+nvm install 22 && nvm use 22
+fnm install 22 && fnm use 22
+brew install node@22
+```
+
+```bash
+rm -rf node_modules
 npm install
 npm run data:fetch      # downloads the latest 2027 HRDF zip (~200 MB) to data/hrdf.zip
 npm run data:build      # streams it into data/hrdf.sqlite (~3.3 GB, about 3 min)
 npm run dev             # http://localhost:4317
 ```
+
+`package.json` has `"engines": { "node": ">=22" }`. `.nvmrc` / `.node-version` are set to `22`.
 
 `data/` is git-ignored. Raw HRDF data and the database are never committed.
 
@@ -77,3 +89,54 @@ Stack: Next.js 16 (App Router), TypeScript, Tailwind CSS v4, shadcn/ui, better-s
 - Range resolution inside a journey (`*A`/`*G`/`*L`/`*I`/`*R`/`*CI`/`*CO` from/to) follows H §7.1.1: empty = first/last stop, `#n` = 0-based route index, from-stop searched from the front, to-stop from the back, with the time and `#n` occurrence columns used to disambiguate loops.
 - **Attributes** (`*A`, other than VE) are shown on the journey timeline for the selected date, using ATTRIBUT stop relevance (boarding / alighting / intermediate / section) and `#` output rules (`--` suppresses a partial section).
 - ZEITVS is shown but not applied: times are displayed as published (local time of each stop).
+
+## Deploy (full 2027 database)
+
+The SQLite file is **~3.3 GB** after `data:fetch` + `data:build`. Serverless hosts (Vercel Hobby, Netlify, Cloudflare Workers) cannot hold it. A running Node process with **~4 GB disk** and **≥1 GB RAM** is required. `better-sqlite3` stays as the library.
+
+No $0 PaaS disk currently fits that file:
+
+| Platform | Disk that can hold 3.3 GB | Cost |
+|---|---|---|
+| Vercel Hobby | none (serverless) | n/a |
+| Koyeb Free | 2 GB SSD | too small |
+| Render Free | ephemeral, **no persistent disk** | rebuild lost on every spin-down; 512 MB RAM |
+| Hugging Face Docker CPU Basic | 50 GB ephemeral, 16 GB RAM | **creating** a Docker Space now needs a paid HF plan (PRO). Runtime on CPU Basic is $0/hour after that. |
+| Fly.io volume | 10 GB persistent | **$0.15/GB-month = $1.50/month** for 10 GB, plus a 1 GB shared VM (~$8.78/month if always on; less with auto-stop) |
+
+**Cheapest persistent option: Fly.io 10 GB volume ($1.50/month storage)** plus a `shared-cpu-1x` 1 GB machine. That is the path this repo is wired for (`Dockerfile` + `fly.toml`).
+
+This VM cannot deploy for you: there is no Fly/Render/Railway/HF token here, only GitHub. One-time clicks on your machine:
+
+1. Install [flyctl](https://fly.io/docs/flyctl/install/) and sign in (`fly auth login`). New Fly accounts are pay-as-you-go (credit card).
+2. From the repo root:
+
+```bash
+fly launch --no-deploy --copy-config --name hrdf-explorer --region fra
+fly secrets set GH_TOKEN="$GH_TOKEN"
+fly deploy
+```
+
+`fly launch` creates the app and a 10 GB volume mounted at `/data`. First boot runs `data:fetch` + `data:build` into `/data/hrdf.sqlite` (~3 minutes). Later boots reuse the volume. Auto-stop is on, so idle machines go to sleep; the next request may take a few seconds (or ~3 minutes if you skipped the volume and the DB has to be rebuilt).
+
+Public URL after deploy: `https://hrdf-explorer.fly.dev` (or the name `fly launch` assigned).
+
+Set `GH_TOKEN` as a Fly secret so GitHub API calls work at runtime. Do not commit it.
+
+### Docker locally (same image the host runs)
+
+```bash
+docker build -t hrdf-explorer .
+docker run --rm -p 4317:8080 -v hrdf-data:/data -e PORT=8080 hrdf-explorer
+```
+
+First run downloads and builds the 2027 database into the `hrdf-data` volume. Open http://localhost:4317.
+
+### Hugging Face Spaces (if you already have PRO)
+
+Create a **Docker** Space from this GitHub repo, set **app port 8080**, add `GH_TOKEN` under Space secrets, and leave hardware on **CPU Basic** (16 GB RAM, 50 GB disk, $0/hour). The same Dockerfile fetches the full timetable on first start. The DB is ephemeral unless you attach paid storage; a sleep/restart rebuilds it.
+
+### Render / Railway
+
+GitHub-connected, but not free at this size. Render persistent disks start at **$0.25/GB-month** and need a **paid** web service (Starter $7/month, 512 MB RAM — tight; Standard 2 GB RAM is safer). Railway volumes are similar (~$0.15/GB-month) on the Hobby plan.
+

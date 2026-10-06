@@ -1,0 +1,15 @@
+.git
+.github
+.next
+node_modules
+data
+agent-tools
+docs/screenshots
+*.md
+!README.md
+.DS_Store
+.env*
+.cursor
+.vscode
+coverage
+npm-debug.log*
