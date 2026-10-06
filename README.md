@@ -123,6 +123,8 @@ Public URL after deploy: `https://hrdf-explorer.fly.dev` (or the name `fly launc
 
 Set `GH_TOKEN` as a Fly secret so GitHub API calls work at runtime. Do not commit it.
 
+To redeploy from GitHub later, add an Actions secret `FLY_API_TOKEN` (`fly tokens create deploy -a hrdf-explorer`) and a workflow that runs `flyctl deploy --remote-only --wait-timeout 15m` on `workflow_dispatch`. This token cannot push `.github/workflows/` files (needs the `workflow` scope), so add that workflow from the GitHub UI if you want it.
+
 ### Docker locally (same image the host runs)
 
 ```bash
