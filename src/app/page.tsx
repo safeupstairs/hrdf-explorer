@@ -6,6 +6,7 @@ import { overview, searchStations } from "@/lib/hrdf/queries";
 import { formatDate } from "@/lib/hrdf/calendar";
 import { describeFile } from "@/lib/hrdf/decoders";
 import { NoData, Section, Stat } from "@/components/page";
+import { DataWizard } from "@/components/hrdf/data-wizard";
 
 const EXAMPLES = [
   { label: "Zürich HB departures", href: "/stations/8503000" },
@@ -125,6 +126,14 @@ export default async function Home() {
       <div className="mt-10 flex items-center gap-2 text-sm text-muted-foreground">
         <ArrowRight className="size-4" /> Database built {new Date(o.meta.built_at).toLocaleString("en-GB")} from {o.meta.source_zip} in {o.meta.build_seconds}s.
       </div>
+
+      <Section title="Load a local HRDF zip" aside="Replaces the current database">
+        <p className="mb-4 max-w-2xl text-sm text-muted-foreground">
+          Drop another official zip or fetch the newest opentransportdata.swiss build. The same importer as{" "}
+          <span className="font-mono text-[12.5px]">npm run data:build -- path/to.zip</span> writes a new SQLite file (about 3 minutes / 3.3 GB for a full export), then this page reloads.
+        </p>
+        <DataWizard variant="compact" />
+      </Section>
     </div>
   );
 }

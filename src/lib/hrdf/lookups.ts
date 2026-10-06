@@ -400,3 +400,9 @@ export function categoryIn(code: string | null, lang: Lang): Category | null {
   const t = texts(lang);
   return { ...base, label: t.catLabels.get(base.code) ?? base.label, classLabel: t.classLabels.get(base.productClass) ?? base.classLabel };
 }
+
+export function resetLookups() {
+  g.__hrdfCache = undefined;
+  const store = globalThis as unknown as { __hrdfTexts?: Partial<Record<Lang, Texts>> };
+  store.__hrdfTexts = undefined;
+}

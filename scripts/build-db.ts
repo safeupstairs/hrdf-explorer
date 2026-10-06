@@ -15,6 +15,7 @@ import type { Readable } from "node:stream";
 import { parseFplanLine, parseHrdfTime } from "../src/lib/hrdf/fplan";
 import { bitfieldDays, parseHrdfDate } from "../src/lib/hrdf/calendar";
 import { baseName, decodeLine, isSectionHeader, lineKey } from "../src/lib/hrdf/decoders";
+import { emitProgress } from "../src/lib/import-progress";
 
 const zipPath = path.resolve(process.argv[2] ?? process.env.HRDF_ZIP ?? "data/hrdf.zip");
 const dbPath = path.resolve(process.argv[3] ?? process.env.HRDF_DB ?? "data/hrdf.sqlite");
@@ -104,8 +105,15 @@ function entryStream(zf: yauzl.ZipFile, e: yauzl.Entry): Promise<Readable> {
   return new Promise((res, rej) => zf.openReadStream(e, (err, s) => (err || !s ? rej(err) : res(s))));
 }
 
-async function* readLines(zf: yauzl.ZipFile, e: yauzl.Entry): AsyncGenerator<string> {
+async function* readLines(zf: yauzl.ZipFile, e: yauzl.Entry, onBytes?: (n: number) => void): AsyncGenerator<string> {
   const stream = await entryStream(zf, e);
+  if (onBytes) {
+    let seen = 0;
+    stream.on("data", (chunk: Buffer) => {
+      seen += chunk.length;
+      onBytes(seen);
+    });
+  }
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   for await (const line of rl) yield line.replace(/^\uFEFF/, "");
 }
@@ -137,9 +145,18 @@ async function main() {
   db.exec(SCHEMA);
 
   const t0 = Date.now();
+  emitProgress({ phase: "building", pct: 1, message: `Opening ${path.basename(zipPath)}` }, { force: true });
   const zf = await openZip(zipPath);
   const entries = (await listEntries(zf)).sort((a, b) => rank(a.fileName) - rank(b.fileName));
   log(`${entries.length} files in ${path.basename(zipPath)}`);
+  const totalBytes = entries.reduce((s, e) => s + e.uncompressedSize, 0) || 1;
+  let completedBytes = 0;
+  const prog = { name: "", extra: "" };
+  const onBytes = (n: number) => {
+    const pct = 4 + ((completedBytes + n) / totalBytes) * 86;
+    const message = prog.extra ? `${prog.name}: ${prog.extra}` : `Reading ${prog.name}…`;
+    emitProgress({ phase: "building", pct: Math.min(90, pct), message, bytes: completedBytes + n, totalBytes });
+  };
 
   const insMeta = db.prepare("INSERT OR REPLACE INTO meta VALUES (?, ?)");
   const insFile = db.prepare("INSERT INTO files VALUES (?, ?, ?, ?)");
@@ -171,24 +188,31 @@ async function main() {
     const name = e.fileName;
     const base = baseName(name);
     const t = Date.now();
+    prog.name = name;
+    prog.extra = "";
+    emitProgress({ phase: "building", pct: 4 + (completedBytes / totalBytes) * 86, message: `Reading ${name}…`, bytes: completedBytes, totalBytes }, { force: true });
 
     if (name === "FPLAN") {
-      const n = await importFplan(db, zf, e, lineNames, tick);
+      const n = await importFplan(db, zf, e, lineNames, tick, onBytes, (extra) => {
+        prog.extra = extra;
+      });
       insFile.run(name, e.uncompressedSize, n, "fplan");
       log(`FPLAN: ${n.toLocaleString()} lines in ${((Date.now() - t) / 1000).toFixed(0)}s`);
+      completedBytes += e.uncompressedSize;
       continue;
     }
     if (base === "GLEISE" || base === "GLEIS") {
-      const n = await importGleise(db, zf, e, tick);
+      const n = await importGleise(db, zf, e, tick, onBytes);
       insFile.run(name, e.uncompressedSize, n, "gleise");
       log(`${name}: ${n.toLocaleString()} lines in ${((Date.now() - t) / 1000).toFixed(0)}s`);
+      completedBytes += e.uncompressedSize;
       continue;
     }
 
     let n = 0;
     let section: string | null = null;
     const skipRefs = base === "INFOTEXT";
-    for await (const raw of readLines(zf, e)) {
+    for await (const raw of readLines(zf, e, onBytes)) {
       // ZEITVS ships with "%" instead of newlines between records.
       const parts = base === "ZEITVS" && !raw.includes("\n") && raw.split("%").length > 3 ? splitZeitvs(raw) : [raw];
       for (const line of parts) {
@@ -212,6 +236,7 @@ async function main() {
     }
     insFile.run(name, e.uncompressedSize, n, "lines");
     log(`${name}: ${n.toLocaleString()} lines`);
+    completedBytes += e.uncompressedSize;
   }
 
   function collect(name: string, base: string, line: string, section: string | null) {
@@ -292,9 +317,11 @@ async function main() {
       }
     })();
     log(`Bitfield operating-day counts (skipping 2-bit padding) for ${nDays} days`);
+    emitProgress({ phase: "building", pct: 91, message: `Bitfield operating-day counts for ${nDays} days` }, { force: true });
   }
 
   log(`Writing ${stations.size.toLocaleString()} stations`);
+  emitProgress({ phase: "building", pct: 93, message: `Writing ${stations.size.toLocaleString()} stations` }, { force: true });
   const insStation = db.prepare(
     "INSERT INTO stations(id,name,name_norm,long_name,abbr,synonyms,lon,lat,alt,e,n,prio,kminfo,sloid,country) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
   );
@@ -311,15 +338,20 @@ async function main() {
   })();
 
   log("Creating indexes");
+  emitProgress({ phase: "building", pct: 95, message: "Creating indexes" }, { force: true });
   db.exec(INDEXES);
   log("Counting stop events per station");
+  emitProgress({ phase: "building", pct: 97, message: "Counting stop events per station" }, { force: true });
   db.exec("UPDATE stations SET stop_events = (SELECT COUNT(*) FROM stops WHERE stops.stop = stations.id)");
   db.exec("ANALYZE");
   insMeta.run("build_seconds", String(Math.round((Date.now() - t0) / 1000)));
   zf.close();
   db.close();
   renameSync(tmpPath, dbPath);
-  log(`Done in ${((Date.now() - t0) / 1000).toFixed(0)}s → ${dbPath} (${(statSync(dbPath).size / 1e9).toFixed(2)} GB)`);
+  const seconds = (Date.now() - t0) / 1000;
+  const gb = statSync(dbPath).size / 1e9;
+  log(`Done in ${seconds.toFixed(0)}s → ${dbPath} (${gb.toFixed(2)} GB)`);
+  emitProgress({ phase: "done", pct: 100, message: `Done in ${seconds.toFixed(0)}s → ${path.basename(dbPath)} (${gb.toFixed(2)} GB)` }, { force: true });
 }
 
 /**
@@ -349,6 +381,8 @@ async function importFplan(
   e: yauzl.Entry,
   lineNames: Map<number, string>,
   tick: () => void,
+  onBytes?: (n: number) => void,
+  onExtra?: (extra: string) => void,
 ): Promise<number> {
   const insJourney = db.prepare(
     "INSERT INTO journeys VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -448,20 +482,22 @@ async function importFplan(
     tick();
   };
 
-  for await (const line of readLines(zf, e)) {
+  for await (const line of readLines(zf, e, onBytes)) {
     n++;
     if (line.startsWith("*Z")) flush();
     buf.push(line);
     if (n % 1_000_000 === 0 && Date.now() - lastLog > 5000) {
       lastLog = Date.now();
-      log(`  FPLAN ${(n / 1e6).toFixed(0)}M lines, ${id.toLocaleString()} journeys`);
+      const extra = `${(n / 1e6).toFixed(0)}M lines, ${id.toLocaleString()} journeys`;
+      log(`  FPLAN ${extra}`);
+      onExtra?.(extra);
     }
   }
   flush();
   return n;
 }
 
-async function importGleise(db: Database.Database, zf: yauzl.ZipFile, e: yauzl.Entry, tick: () => void): Promise<number> {
+async function importGleise(db: Database.Database, zf: yauzl.ZipFile, e: yauzl.Entry, tick: () => void, onBytes?: (n: number) => void): Promise<number> {
   const name = e.fileName;
   const already = (db.prepare("SELECT value FROM meta WHERE key='gleise_assign_source'").get() as { value: string } | undefined)?.value;
   const loadAssignments = !already;
@@ -470,7 +506,7 @@ async function importGleise(db: Database.Database, zf: yauzl.ZipFile, e: yauzl.E
   const hash = createHash("sha1");
   let n = 0;
   let assigns = 0;
-  for await (const line of readLines(zf, e)) {
+  for await (const line of readLines(zf, e, onBytes)) {
     n++;
     if (line.charAt(8) === "#") {
       const [stop, ref, kind, ...rest] = line.trim().split(/\s+/);

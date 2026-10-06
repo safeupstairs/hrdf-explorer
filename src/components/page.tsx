@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ChevronLeft, ChevronRight, Database } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DataWizard } from "@/components/hrdf/data-wizard";
 
 export function PageHeader({
   eyebrow,
@@ -90,17 +91,7 @@ function PagerLink({ href, children }: { href: string | null; children: React.Re
 }
 
 export function NoData() {
-  return (
-    <div className="mx-auto max-w-2xl py-16">
-      <EmptyState title="No HRDF database found">
-        <p>The explorer reads a local SQLite file built from the official HRDF zip. Create it with:</p>
-        <pre className="mt-4 rounded-md bg-board p-4 text-left font-mono text-[12.5px] text-board-foreground">
-          npm run data:fetch{"\n"}npm run data:build
-        </pre>
-        <p className="mt-3">Then reload this page.</p>
-      </EmptyState>
-    </div>
-  );
+  return <DataWizard variant="page" />;
 }
 
 export function FilterInput({ name, defaultValue, placeholder, label, className, type = "text" }: { name: string; defaultValue?: string; placeholder?: string; label: string; className?: string; type?: string }) {
