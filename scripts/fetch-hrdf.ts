@@ -8,6 +8,7 @@ import { createWriteStream, mkdirSync, renameSync } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
+import { emitProgress } from "../src/lib/import-progress";
 
 const DEFAULT_DATASET = "timetable-54-2027-hrdf";
 
@@ -22,6 +23,7 @@ async function main() {
   const out = path.resolve(process.env.HRDF_ZIP ?? "data/hrdf.zip");
   mkdirSync(path.dirname(out), { recursive: true });
   console.log(`Downloading ${url}`);
+  emitProgress({ phase: "download", pct: 0, message: `Downloading ${url}` }, { force: true });
   const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "hrdf-explorer/0.1" } });
   if (!res.ok || !res.body) throw new Error(`Download failed: HTTP ${res.status} ${res.statusText}`);
   const total = Number(res.headers.get("content-length") ?? 0);
@@ -35,12 +37,26 @@ async function main() {
       last = Date.now();
       const pct = total ? ` (${((done / total) * 100).toFixed(1)}%)` : "";
       process.stdout.write(`\r  ${(done / 1e6).toFixed(1)} MB${pct}   `);
+      emitProgress({
+        phase: "download",
+        pct: total ? (done / total) * 100 : 0,
+        message: `Downloading ${(done / 1e6).toFixed(1)} MB${total ? ` of ${(total / 1e6).toFixed(0)} MB` : ""}`,
+        bytes: done,
+        totalBytes: total || undefined,
+      });
     }
   });
   const tmp = `${out}.part`;
   await pipeline(body, createWriteStream(tmp));
   renameSync(tmp, out);
   console.log(`\nSaved ${(done / 1e6).toFixed(1)} MB to ${out}${fileName ? ` (${fileName})` : ""}`);
+  emitProgress({
+    phase: "download",
+    pct: 100,
+    message: `Saved ${(done / 1e6).toFixed(1)} MB${fileName ? ` (${fileName})` : ""}`,
+    bytes: done,
+    totalBytes: total || done,
+  }, { force: true });
   console.log("Next: npm run data:build");
 }
 

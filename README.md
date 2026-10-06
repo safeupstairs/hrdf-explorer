@@ -26,9 +26,19 @@ brew install node@22
 ```bash
 rm -rf node_modules
 npm install
+npm run dev             # http://localhost:4317
+```
+
+On first load, if `data/hrdf.sqlite` is missing or empty, the app shows a wizard:
+
+- **Fetch the newest build** — downloads the latest 2027 HRDF zip from opentransportdata.swiss (~200 MB) and imports it.
+- **Use a local zip** — drop or choose a zip; the same importer as `npm run data:build -- path/to.zip` runs in the background.
+
+A full import writes ~3.3 GB and takes about 3 minutes. The wizard has a real progress bar, plus loading, error and success states. You can also replace the current database from the home page drop zone. CLI still works:
+
+```bash
 npm run data:fetch      # downloads the latest 2027 HRDF zip (~200 MB) to data/hrdf.zip
 npm run data:build      # streams it into data/hrdf.sqlite (~3.3 GB, about 3 min)
-npm run dev             # http://localhost:4317
 ```
 
 `package.json` has `"engines": { "node": ">=22" }`. `.nvmrc` / `.node-version` are set to `22`.
